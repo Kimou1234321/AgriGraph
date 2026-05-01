@@ -51,6 +51,14 @@ export async function runCounterfactual(payload) {
   });
 }
 
+export async function runCounterfactualGlobal(payload) {
+  return requestJson("/counterfactual/global", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
 export async function fetchComparison() {
   return requestJson("/comparison");
 }
@@ -122,6 +130,27 @@ export function getCountyScoreForYear(county, year, historicalRows, forecastRows
   }
   const forecast = forecastRows.find((item) => item.county === county && Number(item.year) === year);
   return forecast ? Number(forecast.predicted_score) : null;
+}
+
+/** Score for UI when toggling Initial vs Simulation (counterfactual exists only for forecast years). */
+export function getCountyScoreForYearWithSimulation(
+  county,
+  year,
+  historicalRows,
+  forecastRows,
+  simulationResults,
+  viewMode
+) {
+  if (
+    viewMode === "simulation" &&
+    simulationResults?.by_county?.[county] &&
+    year >= CONSTANTS.FORECAST_START_YEAR
+  ) {
+    const rows = simulationResults.by_county[county].counterfactual ?? [];
+    const row = rows.find((item) => Number(item.year) === year);
+    if (row && Number.isFinite(Number(row.score))) return Number(row.score);
+  }
+  return getCountyScoreForYear(county, year, historicalRows, forecastRows);
 }
 
 export function countyTrendFromScores(score2025, score2030) {

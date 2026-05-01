@@ -31,7 +31,6 @@ from backend.pipeline.forecast import (
     score_temporal_limits,
 )
 from backend.pipeline.pillar_transform import (
-    CONSTANTS as PT_CONST,
     load_frozen_transforms,
     raw_to_pillars,
 )
@@ -48,6 +47,8 @@ CONSTANTS: dict[str, Any] = {
     "YEAR_2025": 2025,
     "CLIP_MIN": 0.0,
     "CLIP_MAX": 1.0,
+    "DELTA_MIN": -1.0,
+    "DELTA_MAX": 1.0,
     "PRESET_SCENARIOS": {
         "Monaghan_LowPerformer": {
             "county": "Monaghan",
@@ -100,6 +101,14 @@ def _apply_interventions(
     return np.clip(out, CONSTANTS["CLIP_MIN"], CONSTANTS["CLIP_MAX"])
 
 
+def _clipped_interventions(interventions: dict[str, float]) -> dict[str, float]:
+    """Clamp intervention deltas to configured safe bounds."""
+    return {
+        feat: float(np.clip(float(delta), CONSTANTS["DELTA_MIN"], CONSTANTS["DELTA_MAX"]))
+        for feat, delta in interventions.items()
+    }
+
+
 def _baseline_pillars_2025(county: str, pillars_df: pd.DataFrame) -> np.ndarray:
     """Read standardized pillars for real 2025."""
     row = pillars_df[
@@ -146,12 +155,11 @@ def _score_trend_fallback(scores_real: pd.DataFrame, counties: list[str], year: 
     )
 
 
-def simulate_counterfactual(
-    county: str,
-    interventions: dict[str, float],
+def simulate_counterfactual_global(
+    scenarios: dict[str, dict[str, float]],
     horizon: int = 11,
 ) -> dict[str, Any]:
-    """Run raw delta -> frozen pillar recompute -> persistent pillar shift -> STGNN AR forecast."""
+    """Run one global counterfactual chain with per-county intervention sets."""
     forecast_years = forecast_mod.CONSTANTS["FORECAST_YEARS"]
     if horizon != len(forecast_years):
         horizon = len(forecast_years)
@@ -163,17 +171,19 @@ def simulate_counterfactual(
     edge_index = edge_index.to(device)
     model = load_forecast_model(device)
 
-    if county not in counties:
-        raise ValueError(f"[A10] Unknown county: {county}")
-    county_idx = counties.index(county)
-
-    x_base = _county_normalized_row_2025(county)
-    x_tilde = _apply_interventions(x_base, interventions)
-    s_tilde = raw_to_pillars(x_tilde, frozen)
     pillars_df = pd.read_csv(CONSTANTS["DATA_DIR"] / CONSTANTS["PILLAR_SCORES_FILENAME"])
-    s_base = _baseline_pillars_2025(county, pillars_df)
-    pillar_shift = s_tilde - s_base
-    pillar_shifts = {f"P{k + 1}_delta": float(pillar_shift[k]) for k in range(PT_CONST["N_PILLARS"])}
+    clipped_scenarios: dict[str, dict[str, float]] = {}
+    pillar_shift_by_county: dict[str, np.ndarray] = {}
+    for county, interventions in scenarios.items():
+        if county not in counties:
+            raise ValueError(f"[A10] Unknown county: {county}")
+        clipped = _clipped_interventions(interventions)
+        clipped_scenarios[county] = clipped
+        x_base = _county_normalized_row_2025(county)
+        x_tilde = _apply_interventions(x_base, clipped)
+        s_tilde = raw_to_pillars(x_tilde, frozen)
+        s_base = _baseline_pillars_2025(county, pillars_df)
+        pillar_shift_by_county[county] = s_tilde - s_base
 
     scores_real = pd.read_csv(CONSTANTS["DATA_DIR"] / "sustainability_scores.csv")
     exp_n = forecast_mod.CONSTANTS["EXPECTED_NODES"]
@@ -219,9 +229,22 @@ def simulate_counterfactual(
 
     scenario_last = prev_scores_by_year[2025].copy()
     scenario_last_delta = np.zeros_like(scenario_last)
-    baseline_trajectory: list[dict[str, Any]] = []
-    scenario_trajectory: list[dict[str, Any]] = []
-    uplift_trajectory: list[dict[str, Any]] = []
+    by_county: dict[str, dict[str, Any]] = {
+        county: {
+            "baseline": [],
+            "counterfactual": [],
+            "uplift": [],
+            "pillar_shifts": {
+                "P1": float(pillar_shift_by_county.get(county, np.zeros(4, dtype=np.float64))[0]),
+                "P2": float(pillar_shift_by_county.get(county, np.zeros(4, dtype=np.float64))[1]),
+                "P3": float(pillar_shift_by_county.get(county, np.zeros(4, dtype=np.float64))[2]),
+                "P4": float(pillar_shift_by_county.get(county, np.zeros(4, dtype=np.float64))[3]),
+            },
+            "uplift_final_year": 0.0,
+            "explanation": "",
+        }
+        for county in counties
+    }
 
     forecast_years_slice = forecast_years[:horizon]
     for fy in forecast_years_slice:
@@ -233,18 +256,11 @@ def simulate_counterfactual(
         p_baseline = clamp_pillar_deltas(p_baseline, pillar_prev, pillar_delta_limit)
         p_baseline = clamp_pillars_to_support(p_baseline, pillar_lower, pillar_upper)
         p_use = p_baseline.copy()
-        p_use[county_idx, :] = p_baseline[county_idx, :] + pillar_shift
+        for county, shift in pillar_shift_by_county.items():
+            county_idx = counties.index(county)
+            p_use[county_idx, :] = p_baseline[county_idx, :] + shift
         p_use = clamp_pillars_to_support(p_use, pillar_lower, pillar_upper)
-
-        prev_vec = np.zeros(exp_n, dtype=np.float64)
-        for i, cty in enumerate(counties):
-            if fy == forecast_years[0]:
-                prev_vec[i] = prev_scores_by_year[2025][i]
-            else:
-                if i == county_idx:
-                    prev_vec[i] = scenario_last[i]
-                else:
-                    prev_vec[i] = baseline_scores[(cty, fy - 1)]
+        prev_vec = scenario_last.copy()
 
         lag_z = (prev_vec - y_bar) / max(sigma_y, forecast_mod.CONSTANTS["EPSILON"])
         lag_z = np.clip(lag_z, lag_bounds[0], lag_bounds[1])
@@ -279,29 +295,57 @@ def simulate_counterfactual(
         y_safe, _, _ = apply_fail_safe_policy(y_limited, fallback_scores, ood_scores, invalid_mask)
         y_hat, _ = bounded_score_predictions(y_safe, fallback_scores)
 
-        base_y = baseline_scores[(county, fy)]
-        scen_y = float(y_hat[county_idx])
-        baseline_trajectory.append({"year": fy, "score": base_y})
-        scenario_trajectory.append({"year": fy, "score": round(scen_y, 1)})
-        uplift_trajectory.append({"year": fy, "delta": round(scen_y - base_y, 1)})
-        scenario_last = scenario_last.copy()
-        scenario_last_delta = y_hat - scenario_last
-        scenario_last[county_idx] = scen_y
+        prior = scenario_last.copy()
+        for idx, county in enumerate(counties):
+            base_y = baseline_scores[(county, fy)]
+            scen_y = float(y_hat[idx])
+            by_county[county]["baseline"].append({"year": fy, "score": base_y})
+            by_county[county]["counterfactual"].append({"year": fy, "score": round(scen_y, 1)})
+            by_county[county]["uplift"].append({"year": fy, "delta": round(scen_y - base_y, 1)})
+        scenario_last_delta = y_hat - prior
+        scenario_last = y_hat.copy()
         pillar_prev = p_baseline.copy()
         window_tensors = [window_tensors[1], window_tensors[2], window_tensors[3], x_fy]
 
-    uplift_final = uplift_trajectory[-1]["delta"]
+    for county in counties:
+        uplift = by_county[county]["uplift"]
+        by_county[county]["uplift_final_year"] = float(uplift[-1]["delta"]) if uplift else 0.0
     final_year = int(forecast_years_slice[-1])
     return {
-        "county": county,
-        "interventions": interventions,
-        "pillar_shifts": pillar_shifts,
-        "baseline": baseline_trajectory,
-        "counterfactual": scenario_trajectory,
-        "uplift": uplift_trajectory,
-        "uplift_final_year": uplift_final,
+        "scenarios": clipped_scenarios,
+        "horizon": list(forecast_years_slice),
+        "by_county": by_county,
         "final_year": final_year,
-        "metadata": {"horizon": list(forecast_years_slice), "model": "stgnn_forecast_weights.pt"},
+        "metadata": {"model": "stgnn_forecast_weights.pt"},
+    }
+
+
+def simulate_counterfactual(
+    county: str,
+    interventions: dict[str, float],
+    horizon: int = 11,
+) -> dict[str, Any]:
+    """Run legacy single-county counterfactual via global simulator wrapper."""
+    result = simulate_counterfactual_global({county: interventions}, horizon=horizon)
+    county_result = result["by_county"][county]
+    return {
+        "county": county,
+        "interventions": result["scenarios"].get(county, {}),
+        "pillar_shifts": {
+            "P1_delta": float(county_result["pillar_shifts"]["P1"]),
+            "P2_delta": float(county_result["pillar_shifts"]["P2"]),
+            "P3_delta": float(county_result["pillar_shifts"]["P3"]),
+            "P4_delta": float(county_result["pillar_shifts"]["P4"]),
+        },
+        "baseline": county_result["baseline"],
+        "counterfactual": county_result["counterfactual"],
+        "uplift": county_result["uplift"],
+        "uplift_final_year": float(county_result["uplift_final_year"]),
+        "final_year": int(result["final_year"]),
+        "metadata": {
+            "horizon": list(result["horizon"]),
+            "model": "stgnn_forecast_weights.pt",
+        },
     }
 
 

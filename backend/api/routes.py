@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 from backend.api.baselines import county_mean_baseline, linear_trend_baseline
 from backend.api.explanation import generate_explanation
 from backend.api.state import AppState
-from backend.pipeline.counterfactual import simulate_counterfactual
+from backend.pipeline.counterfactual import simulate_counterfactual, simulate_counterfactual_global
 from backend.pipeline.pillar_transform import CONSTANTS as PT_CONST
 from backend.pipeline.pillar_transform import raw_to_pillars
 
@@ -66,6 +66,21 @@ class CounterfactualResponse(BaseModel):
     uplift: list[dict[str, Any]]
     pillar_shifts: dict[str, float]
     explanation: str
+
+
+class GlobalCounterfactualRequest(BaseModel):
+    """Input payload for global multi-county counterfactual simulation."""
+
+    scenarios: dict[str, dict[str, float]] = Field(default_factory=dict)
+    horizon: int = 11
+
+
+class GlobalCounterfactualResponse(BaseModel):
+    """Global counterfactual endpoint payload."""
+
+    horizon: list[int]
+    final_year: int
+    by_county: dict[str, dict[str, Any]]
 
 
 def _state(request: Request) -> AppState:
@@ -236,6 +251,39 @@ async def counterfactual(payload: CounterfactualRequest, request: Request) -> Co
         uplift=result["uplift"],
         pillar_shifts=pillar_shifts,
         explanation=explanation,
+    )
+
+
+@router.post("/counterfactual/global", response_model=GlobalCounterfactualResponse)
+async def counterfactual_global(
+    payload: GlobalCounterfactualRequest,
+    request: Request,
+) -> GlobalCounterfactualResponse:
+    """Run global counterfactual simulator over all selected county interventions."""
+    state = _state(request)
+    if not payload.scenarios:
+        raise HTTPException(status_code=400, detail="scenarios cannot be empty")
+    for county in payload.scenarios:
+        if county not in state.counties:
+            raise HTTPException(status_code=404, detail=f"Unknown county: {county}")
+
+    result = simulate_counterfactual_global(scenarios=payload.scenarios, horizon=payload.horizon)
+    for county, county_block in result["by_county"].items():
+        if county not in payload.scenarios:
+            continue
+        shifts = {key: float(value) for key, value in county_block["pillar_shifts"].items()}
+        county_block["explanation"] = generate_explanation(
+            county=county,
+            interventions=payload.scenarios[county],
+            pillar_shifts=shifts,
+            uplift_final_year=float(county_block["uplift_final_year"]),
+            final_year=int(result["final_year"]),
+            pillar_label_keys=state.pillar_label_keys,
+        )
+    return GlobalCounterfactualResponse(
+        horizon=list(result["horizon"]),
+        final_year=int(result["final_year"]),
+        by_county=result["by_county"],
     )
 
 

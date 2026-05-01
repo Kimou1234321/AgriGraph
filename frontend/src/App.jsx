@@ -1,20 +1,12 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import ErrorState from "./components/ErrorState";
 import LoadingState from "./components/LoadingState";
-import { fetchCounties, fetchForecast, fetchHistorical } from "./api";
-import BenchmarkTable from "./views/BenchmarkTable";
-import CounterfactualView from "./views/CounterfactualView";
-import CountyDashboard from "./views/CountyDashboard";
-import MapView from "./views/MapView";
+import { fetchCounties, fetchForecast, fetchHistorical, runCounterfactualGlobal } from "./api";
+import BenchmarksView from "./views/BenchmarksView";
+import AtlasView from "./views/AtlasView";
 import MethodologyView from "./views/MethodologyView";
 
-const TABS = [
-  "National Map",
-  "County Dashboard",
-  "Simulation",
-  "Benchmarks",
-  "Methodology",
-];
+const TABS = ["Atlas", "Benchmarks", "Methodology"];
 
 export default function App() {
   const [activeTab, setActiveTab] = useState(TABS[0]);
@@ -26,6 +18,11 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [dark, setDark] = useState(false);
+  const [scenarios, setScenarios] = useState({});
+  const [simulationResults, setSimulationResults] = useState(null);
+  const [simulationLoading, setSimulationLoading] = useState(false);
+  const [simulationError, setSimulationError] = useState("");
+  const [atlasCountyConfirmed, setAtlasCountyConfirmed] = useState(false);
 
   const loadBaseData = async () => {
     try {
@@ -40,7 +37,6 @@ export default function App() {
       setCounties(countyList);
       setHistorical(historicalRows);
       setForecast(forecastRows);
-      setSelectedCounty((prev) => prev || countyList[0] || "");
     } catch (err) {
       setError(err.message || "Unable to load startup data.");
     } finally {
@@ -56,6 +52,26 @@ export default function App() {
     document.documentElement.classList.toggle("dark", dark);
   }, [dark]);
 
+  const runGlobalSimulation = useCallback(async () => {
+    if (Object.keys(scenarios).length === 0) return;
+    try {
+      setSimulationLoading(true);
+      setSimulationError("");
+      const response = await runCounterfactualGlobal({ scenarios, horizon: 11 });
+      setSimulationResults(response);
+    } catch (err) {
+      setSimulationError(err.message || "Global simulation failed.");
+    } finally {
+      setSimulationLoading(false);
+    }
+  }, [scenarios]);
+
+  const resetSimulation = useCallback(() => {
+    setScenarios({});
+    setSimulationResults(null);
+    setSimulationError("");
+  }, []);
+
   const ActiveView = useMemo(() => {
     const sharedProps = {
       counties,
@@ -66,12 +82,51 @@ export default function App() {
       selectedYear,
       setSelectedYear,
     };
-    if (activeTab === "National Map") return <MapView {...sharedProps} />;
-    if (activeTab === "County Dashboard") return <CountyDashboard {...sharedProps} />;
-    if (activeTab === "Simulation") return <CounterfactualView {...sharedProps} />;
-    if (activeTab === "Benchmarks") return <BenchmarkTable {...sharedProps} setActiveTab={setActiveTab} />;
+    if (activeTab === "Atlas")
+      return (
+        <AtlasView
+          {...sharedProps}
+          scenarios={scenarios}
+          setScenarios={setScenarios}
+          simulationResults={simulationResults}
+          runGlobalSimulation={runGlobalSimulation}
+          resetSimulation={resetSimulation}
+          simulationLoading={simulationLoading}
+          simulationError={simulationError}
+          atlasCountyConfirmed={atlasCountyConfirmed}
+          setAtlasCountyConfirmed={setAtlasCountyConfirmed}
+        />
+      );
+    if (activeTab === "Benchmarks")
+      return (
+        <BenchmarksView
+          {...sharedProps}
+          setActiveTab={setActiveTab}
+          simulationResults={simulationResults}
+          setAtlasCountyConfirmed={setAtlasCountyConfirmed}
+        />
+      );
     return <MethodologyView />;
-  }, [activeTab, counties, historical, forecast, selectedCounty, selectedYear]);
+  }, [
+    activeTab,
+    counties,
+    historical,
+    forecast,
+    selectedCounty,
+    selectedYear,
+    scenarios,
+    simulationResults,
+    simulationLoading,
+    simulationError,
+    atlasCountyConfirmed,
+    runGlobalSimulation,
+    resetSimulation,
+  ]);
+
+  const mainClass =
+    activeTab === "Atlas"
+      ? "min-h-screen pt-16"
+      : "mx-auto max-w-[1280px] p-6 pt-24";
 
   return (
     <div className="min-h-screen bg-background text-slate-900 dark:bg-dark-bg dark:text-dark-text-primary">
@@ -105,7 +160,7 @@ export default function App() {
           </div>
         </div>
       </header>
-      <main className="mx-auto max-w-[1280px] p-6 pt-24">
+      <main className={mainClass}>
         {loading ? <LoadingState label="Loading AgriGraph data..." /> : null}
         {!loading && error ? <ErrorState message={error} onRetry={loadBaseData} /> : null}
         {!loading && !error ? ActiveView : null}
@@ -113,4 +168,3 @@ export default function App() {
     </div>
   );
 }
-
