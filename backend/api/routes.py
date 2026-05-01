@@ -17,6 +17,7 @@ from backend.api.state import AppState
 from backend.pipeline.counterfactual import simulate_counterfactual, simulate_counterfactual_global
 from backend.pipeline.pillar_transform import CONSTANTS as PT_CONST
 from backend.pipeline.pillar_transform import raw_to_pillars
+from backend.pipeline.vae import CONSTANTS as VAE_CONST
 
 CONSTANTS: dict[str, Any] = {
     "ROUTER_PREFIX": "/api",
@@ -401,5 +402,9 @@ async def get_cvae_validation(_: Request) -> dict[str, Any]:
         "synth_means": synth_means,
         "summary": final_summary,
         "quality_gate": quality_gate,
+        "code_quality_gate_thresholds": {
+            "mean_abs_feature_diff_max": float(VAE_CONST["MEAN_ABS_DIFF_THRESHOLD"]),
+            "correlation_frobenius_norm_max": float(VAE_CONST["CORRELATION_NORM_THRESHOLD"]),
+        },
     }
 

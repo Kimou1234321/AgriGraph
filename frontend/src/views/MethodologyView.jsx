@@ -13,6 +13,7 @@ export default function MethodologyView() {
   const [learning, setLearning] = useState({ cvae: [], stgnn: [] });
   const [validation, setValidation] = useState(null);
   const [selectedValidationYear, setSelectedValidationYear] = useState(null);
+  const [gateFailuresOpen, setGateFailuresOpen] = useState(false);
   const selectedYearIndex =
     validation && selectedValidationYear !== null
       ? Math.max(0, validation.years.indexOf(selectedValidationYear))
@@ -185,17 +186,63 @@ export default function MethodologyView() {
               </BarChart>
             </ResponsiveContainer>
           </div>
-          <p
+          <div
             className={`mt-3 rounded border p-2 text-xs ${
               validation.quality_gate?.passed
                 ? "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-800/50 dark:bg-emerald-950/40 dark:text-emerald-200"
                 : "border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-800/50 dark:bg-amber-950/40 dark:text-amber-200"
             }`}
           >
-            {validation.quality_gate?.passed
-              ? "CVAE quality gate passed."
-              : `CVAE quality gate failed; fallback used=${String(validation.quality_gate?.fallback_used)}.`}
-          </p>
+            {validation.quality_gate?.passed ? (
+              <p>CVAE quality gate passed. Synthetic variants met configured mean and correlation-structure checks.</p>
+            ) : (
+              <>
+                <p className="font-medium">CVAE quality gate: diagnostic (not a loading error)</p>
+                <p className="mt-1 opacity-95">
+                  Phase A3 compared synthetic variants to real data against fixed thresholds. This run did not pass every
+                  check. The pipeline then used the documented safe fallback: replicate real county-year rows across variant
+                  ids so the graph still has five variants per node-year. API and charts loaded correctly;{" "}
+                  <code className="rounded bg-black/10 px-1 dark:bg-white/10">fallback_used</code> reflects that choice.
+                </p>
+                {Array.isArray(validation.quality_gate?.failures) && validation.quality_gate.failures.length > 0 ? (
+                  <div className="mt-2">
+                    <button
+                      type="button"
+                      className="text-left font-semibold underline decoration-dotted hover:opacity-90"
+                      onClick={() => setGateFailuresOpen((open) => !open)}
+                      aria-expanded={gateFailuresOpen}
+                    >
+                      {gateFailuresOpen ? "Hide" : "Show"} gate details ({validation.quality_gate.failures.length})
+                    </button>
+                    {validation.code_quality_gate_thresholds?.correlation_frobenius_norm_max != null &&
+                    validation.quality_gate?.thresholds?.correlation_frobenius_norm_max != null &&
+                    Number(validation.quality_gate.thresholds.correlation_frobenius_norm_max) !==
+                      Number(validation.code_quality_gate_thresholds.correlation_frobenius_norm_max) ? (
+                      <p className="mt-2 rounded border border-slate-200/80 bg-black/5 p-2 opacity-95 dark:border-dark-border dark:bg-white/5">
+                        The lines below use the correlation Frobenius cap from the last Phase A3 run on disk (
+                        {validation.quality_gate.thresholds.correlation_frobenius_norm_max}). The codebase threshold is now{" "}
+                        {validation.code_quality_gate_thresholds.correlation_frobenius_norm_max}. Re-run Phase A3 to refresh{" "}
+                        <code className="rounded bg-black/10 px-1 dark:bg-white/10">cvae_validation_summary.json</code> and
+                        augmented outputs.
+                      </p>
+                    ) : null}
+                    {gateFailuresOpen ? (
+                      <ul className="mt-2 list-inside list-disc space-y-1 opacity-95">
+                        {validation.quality_gate.failures.map((line) => (
+                          <li key={line}>{line}</li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="mt-1 opacity-90">
+                        First checks: {validation.quality_gate.failures.slice(0, 2).join(" · ")}
+                        {validation.quality_gate.failures.length > 2 ? " …" : ""}
+                      </p>
+                    )}
+                  </div>
+                ) : null}
+              </>
+            )}
+          </div>
         </div>
       ) : null}
 

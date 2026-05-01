@@ -1,12 +1,12 @@
 export default function KpiCard({ label, value, sublabel, tone = "neutral", glass = false }) {
   const solidTone =
     tone === "good"
-      ? "border-emerald-200 bg-emerald-50"
+      ? "border-emerald-200 bg-emerald-50 dark:border-emerald-800/50 dark:bg-emerald-950/40"
       : tone === "warn"
-      ? "border-amber-200 bg-amber-50"
+      ? "border-amber-200 bg-amber-50 dark:border-amber-800/50 dark:bg-amber-950/40"
       : tone === "risk"
-      ? "border-red-200 bg-red-50"
-      : "border-slate-200 bg-white";
+      ? "border-red-200 bg-red-50 dark:border-red-900/50 dark:bg-red-950/40"
+      : "border-slate-200 bg-white dark:border-dark-border dark:bg-dark-surface";
   const glassTone =
     tone === "good"
       ? "border-emerald-200/50 bg-emerald-50/70 backdrop-blur-md dark:border-emerald-800/40 dark:bg-emerald-950/35"
