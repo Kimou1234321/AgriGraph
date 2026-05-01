@@ -17,6 +17,8 @@ CONSTANTS: dict[str, Any] = {
     "SIGMA_MC": 0.1,
     "LOWER_PCT": 5.0,
     "UPPER_PCT": 95.0,
+    "SCORE_MIN": 0.0,
+    "SCORE_MAX": 100.0,
     "SEED": 42,
 }
 
@@ -43,6 +45,7 @@ def run_uncertainty() -> None:
     for _, row in baseline_df.iterrows():
         base = float(row["predicted_score"])
         samples = base + rng.normal(0.0, CONSTANTS["SIGMA_MC"], size=CONSTANTS["MONTE_CARLO_TRIALS"])
+        samples = np.clip(samples, CONSTANTS["SCORE_MIN"], CONSTANTS["SCORE_MAX"])
         mean_val = float(np.mean(samples))
         lower = float(np.percentile(samples, CONSTANTS["LOWER_PCT"]))
         upper = float(np.percentile(samples, CONSTANTS["UPPER_PCT"]))

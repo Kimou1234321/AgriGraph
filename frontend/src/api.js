@@ -9,7 +9,10 @@ const CONSTANTS = {
 };
 
 async function requestJson(path, options) {
-  const response = await fetch(`${API_BASE_URL}${path}`, options);
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    cache: "no-store",
+    ...options,
+  });
   if (!response.ok) {
     throw new Error(`API ${path} failed with status ${response.status}.`);
   }
