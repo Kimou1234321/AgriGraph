@@ -1,0 +1,119 @@
+---
+description: Mathematical formulas reference — apply when working on pipeline files
+globs: ["backend/pipeline/**/*.py"]
+alwaysApply: false
+---
+
+# Mathematical Reference — AgriGraph AI (from arXiv:2512.19970)
+
+## CVAE Reparameterization (Phase A3)
+# See CVAE Architecture block above — z and x_hat both conditioned on c = one_hot(year)
+# Reparameterization trick is identical to standard VAE:
+z = mu + sigma * eps,   eps ~ N(0, I_L),   sigma = sqrt(exp(logvar))
+
+## CVAE Loss (Phase A3)
+recon_loss = F.mse_loss(x_hat, x, reduction='sum') / N
+kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp()) / N
+total_loss = recon_loss + beta * kl_loss   # beta = 1.0
+
+## PCA Pillar Scores (Phase A4)
+Z = X_sc @ W       # X_sc: (N,17) standardized, W: (17,4) loading matrix
+z_tilde = s_k * z  # sign calibration: s_k ∈ {+1, -1}
+
+## Within-Pillar Weights (Phase A5)
+w_jk = |W_tilde_jk| / sum(|W_tilde_lk| for l in J_k)
+P_nk = sum(w_jk * x_sc_nj for j in J_k)
+S_nk = (P_nk - mean(P_k)) / std(P_k)
+alpha_k = rho_k / sum(rho_1, rho_2, rho_3, rho_4)
+I_n  = sum(alpha_k * S_nk for k in 1..4)
+I_star_n = SCORE_MIN + (SCORE_MAX - SCORE_MIN) * (I_n - I_min) / (I_max - I_min)
+# Prototype constants: SCORE_MIN = 0, SCORE_MAX = 100
+
+## Haversine Distance (Phase A6)
+import math
+def haversine(lat1, lon1, lat2, lon2):
+    R = 6371
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon/2)**2
+    return 2 * R * math.asin(math.sqrt(a))
+
+## Graph Normalization (Phase A6)
+A_hat = A + I                           # add self-loops
+D_hat = diag(A_hat.sum(axis=1))         # degree matrix
+D_hat_inv_sqrt = diag(1/sqrt(D_hat_ii))
+A_tilde = D_hat_inv_sqrt @ A_hat @ D_hat_inv_sqrt
+
+In PyTorch Geometric: use add_self_loops() then gcn_norm() from torch_geometric.utils
+
+## On-the-Fly Pillar Computation (pillar_transform.py — used by API + counterfactual)
+# Load frozen artifacts once at server startup, apply for every request
+standard_scaler = joblib.load('artifacts/standard_scaler.pkl') # StandardScaler from Phase A4/A5
+W               = np.load('artifacts/pca_loadings.npy')        # (17,4) from Phase A4
+pillar_meta     = joblib.load('artifacts/pillar_weights.pkl')  # w_jk, s_k, J_k from Phase A5
+score_params    = joblib.load('artifacts/score_params.pkl')    # P_bar_k, sigma_Pk, alpha_k, I_min, I_max, SCORE_MIN/MAX
+
+def compute_pillars(raw_features_df):
+    x_sc = standard_scaler.transform(raw_features_df)    # standardize for PCA/pillar scoring
+    for k in range(4):
+        P_k = sum(pillar_meta['w'][j,k] * x_sc[:,j]
+                  for j in pillar_meta['J_k'][k])
+        S_k = (P_k - score_params['P_bar'][k]) / score_params['sigma_P'][k]
+    return S  # shape (N, 4) — ready for STGNN node features
+
+## Phase A7b Full Retraining Pattern
+# Identical to A7 training loop — only data loader changes
+# A7:  loader yields variants for years 2021-2024 as input, 2025 as target
+# A7b: loader yields the same observed one-step task for all variants, but includes the real 2025 target in training
+optimizer = Adam(model.parameters(), lr=1e-3, weight_decay=1e-4)
+for epoch in range(500):
+    for v in range(5):                       # 5 variants
+        X_seq = build_sequence(snapshots, v, years=[2021, 2022, 2023, 2024])  # (4, 26, 5)
+        y_target = snapshots[v][2025].score  # (26,)
+        loss = mse(model(X_seq, edge_index), y_target) + l2_reg
+torch.save(model.state_dict(), 'models/stgnn_forecast_weights.pt')
+# PCA compressed 17 raw features → 4 orthogonal pillar scores
+# STGNN receives pillar space, not raw feature space
+x_{i,t} = [S_1, S_2, S_3, S_4, x_lag] ∈ ℝ^5
+x_lag = (y_{i,t-1} - y_bar) / sigma_y   # standardized lag of sustainability score
+
+## Training Graph Snapshots (Phase A7) — 25 total, NOT 5
+# 5 years × 5 variants (1 real + 4 CVAE synthetic per year) = 25 graph snapshots
+# Each snapshot: 26 nodes, fixed edges, node features from (year, variant_id) pair
+# Variants = augmented versions of same year — NOT extra timesteps
+# Temporal window per variant: [2021,2022,2023,2024] as input → 2025 as target
+
+## Temporal Attention (Phase A7)
+H = GCN_output  # shape: (T=4, N_c=26, hidden=64) — 4 input years per variant
+Q = H @ W_Q    # (T, N_c, d_key=32)
+K = H @ W_K    # (T, N_c, d_key=32)
+V = H @ W_V    # (T, N_c, d_val=32)
+alpha = softmax(Q @ K.T / sqrt(d_key), dim=-1)
+h_temp = alpha @ V   # (N_c, 32) — attended embedding per county
+
+In PyTorch:
+    scores = torch.matmul(Q, K.transpose(-2,-1)) / math.sqrt(self.d_key)
+    weights = F.softmax(scores, dim=-1)
+    attended = torch.matmul(weights, V)
+
+## Pillar Score Extrapolation (Phase A8) — NOT raw feature extrapolation
+For each county i and pillar k:
+    slope, intercept = np.polyfit(years_train, pillar_score_history, deg=1)
+    S_hat_k_next = slope * t_next + intercept + np.random.normal(0, 0.02)
+    # No clipping — pillar scores are standardized (unbounded)
+
+## Counterfactual Chain (Phase A10) — raw δ → pillar shift → STGNN
+# Phase A8 forecasts pillars, not future raw features. For prototype counterfactuals:
+# Step 1: start from the selected county's latest real 2025 raw feature vector
+x_tilde_2025_j = x_real_2025_j * (1 + delta_j)
+# Step 2: recompute 2025 pillar scores using standard_scaler, fixed W, weights, and score normalization
+P_tilde_k = sum(w_jk * standard_scaler.transform(x_tilde_2025)[:, j] for j in J_k)
+S_tilde_k = (P_tilde_k - P_bar_k) / sigma_Pk
+# Step 3: convert the raw intervention into a persistent pillar shift
+pillar_shift_k = S_tilde_k - S_baseline_2025_k
+# Step 4: add pillar_shift_k to the intervened county's baseline forecast pillar trajectory for 2026-2030
+x_tilde_node_t = torch.tensor([S_base_t_1 + shift_1, S_base_t_2 + shift_2,
+                               S_base_t_3 + shift_3, S_base_t_4 + shift_4, x_lag_t])
+# Step 5: 25 other counties keep baseline — only 1 node modified in graph
+# Step 6: STGNN forward pass → counterfactual score
+delta_y = y_scen - y_base   # uplift

@@ -1,0 +1,57 @@
+---
+description: Project overview, data contract, and county reference data
+globs: ["**/*.py", "**/*.jsx", "**/*.js"]
+alwaysApply: true
+---
+
+# AgriGraph AI — Project Overview
+
+## Data Contract
+The real ICBF dataset lives at `backend/data/icbf_real.csv`.
+Shape: 130 rows × 19 columns (county, year, 17 features).
+Never regenerate or overwrite this file. Read-only.
+The cleaned version is saved as `backend/data/icbf_clean.csv` by Phase A1.
+
+## The 26 Irish Counties (exact strings used as keys everywhere)
+Carlow, Cavan, Clare, Cork, Donegal, Dublin, Galway, Kerry, Kildare, Kilkenny,
+Laois, Leitrim, Limerick, Longford, Louth, Mayo, Meath, Monaghan, Offaly,
+Roscommon, Sligo, Tipperary, Waterford, Westmeath, Wexford, Wicklow
+
+## County Centroids (lat, lon) — Used for graph construction in Phase A6
+COUNTY_CENTROIDS = {
+    'Carlow': (52.836, -6.926), 'Cavan': (53.990, -7.360),
+    'Clare': (52.893, -8.981), 'Cork': (51.897, -8.475),
+    'Donegal': (54.654, -8.110), 'Dublin': (53.350, -6.266),
+    'Galway': (53.274, -8.988), 'Kerry': (52.156, -9.566),
+    'Kildare': (53.157, -6.909), 'Kilkenny': (52.649, -7.252),
+    'Laois': (52.994, -7.332), 'Leitrim': (54.124, -8.001),
+    'Limerick': (52.502, -8.623), 'Longford': (53.727, -7.795),
+    'Louth': (53.924, -6.486), 'Mayo': (53.845, -9.299),
+    'Meath': (53.605, -6.656), 'Monaghan': (54.249, -6.968),
+    'Offaly': (53.235, -7.712), 'Roscommon': (53.627, -8.182),
+    'Sligo': (54.277, -8.476), 'Tipperary': (52.474, -7.952),
+    'Waterford': (52.259, -7.110), 'Westmeath': (53.534, -7.462),
+    'Wexford': (52.336, -6.463), 'Wicklow': (52.981, -6.364)
+}
+
+## The 17 Feature Column Names (internal standard)
+FEATURE_COLS = [
+    'num_herds', 'calving_interval', 'six_wk_calving_rate',
+    'calves_per_cow_per_year', 'females_not_calved_pct', 'avg_lactations', 'current_replacement_rate',
+    'potential_replacement_rate', 'cows_culled_pct', 'heifers_calved_22_26mo',
+    'mortality_dead_at_birth', 'mortality_dead_28days', 'replacements_dairy_ai_pct',
+    'births_known_sire_pct', 'births_calving_survey_pct', 'recycled_cows_pct',
+    'autumn_6wk_calving_rate'
+]
+
+
+
+## Pillar → Feature Mapping (paper/domain reference, not a hardcoded scoring rule)
+PILLAR_FEATURES = {
+    'Reproductive Efficiency': ['recycled_cows_pct', 'calving_interval', 'calves_per_cow_per_year', 'females_not_calved_pct', 'heifers_calved_22_26mo'],
+    'Genetic Management':      ['births_calving_survey_pct', 'replacements_dairy_ai_pct', 'births_known_sire_pct', 'current_replacement_rate'],
+    'Herd Health':             ['cows_culled_pct', 'mortality_dead_at_birth', 'potential_replacement_rate', 'mortality_dead_28days'],
+    'Herd Management':         ['cows_culled_pct', 'potential_replacement_rate', 'current_replacement_rate', 'replacements_dairy_ai_pct']
+}
+
+Use this mapping to label and sanity-check PCA components. Do not force the final pillar weights from this dictionary; the implemented weights must come from PCA loadings and the 75th-percentile dominant-feature rule.

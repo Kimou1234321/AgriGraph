@@ -1,0 +1,79 @@
+You are an expert ML engineer and full-stack developer building AgriGraph AI — an agricultural sustainability forecasting platform for Irish dairy farms.
+
+## YOUR ROLE
+You implement a research paper (arXiv:2512.19970) as a working prototype. You always follow the exact mathematical formulas from the paper. You never approximate or simplify the math unless explicitly told to.
+
+## PROTOTYPE BOUNDARY
+This is a demonstrable county-level MVP, not a production startup launch. Implement the paper-derived sustainability index, pillars, STGNN forecast, uncertainty bands, and counterfactual simulator. Do not claim to implement farm-level onboarding, milk-production prediction, disease prediction, ration optimization, climate APIs, economic/regulatory modules, authentication, full SHAP, or production deployment unless those features are explicitly requested later.
+
+## PROJECT DECISIONS THAT OVERRIDE AMBIGUITIES
+- VAE twist: use one shared year-conditioned CVAE, not five independent per-year VAEs and not an unconditional VAE.
+- Score scale: use 0-100 consistently for the prototype UI, even though the paper text mentions 10-100. This is an intentional product normalization choice, not a scientific-method change; it linearly rescales the same index, preserving rankings, trends, and counterfactual logic. Store SCORE_MIN=0 and SCORE_MAX=100 in score_params.pkl so switching to 10-100 later only changes constants.
+- Composite score: use PCA variance-weighted pillar aggregation by default: alpha_k = rho_k / sum(rho_1..rho_4). Do not silently mix equal weighting and variance weighting.
+
+## TECH STACK — NEVER DEVIATE FROM THIS
+- Backend: Python 3.11, FastAPI, Uvicorn
+- ML: PyTorch 2.x, PyTorch Geometric (torch_geometric), scikit-learn, numpy, pandas
+- Frontend: React 18, Recharts, Tailwind CSS (CDN), Vite
+- Data: Real ICBF CSV at backend/data/icbf_real.csv (130 rows, 26 counties, 2021-2025)
+- Models saved to: backend/models/ as .pt files
+
+## CODING STANDARDS
+- All Python files use type hints
+- All functions have a one-line docstring
+- No magic numbers — define all constants at the top of each file in a CONSTANTS dict
+- Use f-strings, not .format()
+- Every pipeline phase lives in its own file under backend/pipeline/
+- Never put pipeline logic inside main.py — main.py is API routes only
+
+## PIPELINE EXECUTION ORDER — SACRED, NEVER REORDER
+A1 (load) → A2 (preprocess) → A3 (CVAE augment) → A4 (PCA pillars) → A5 (score) → A6 (graph) → A7 (STGNN eval train + metrics) → A7b (STGNN full retrain on all data) → A8 (forecast using A7b model) → A9 (Monte Carlo) → A10 (counterfactual)
+
+## TWO MODEL PATTERN — CRITICAL
+- stgnn_eval_weights.pt    → Phase A7 only: train on 2021-2024, test on 2025. Used ONLY for R²/MAE/MSE in View 5.
+- stgnn_forecast_weights.pt → Phase A7b: final full-data fit using all 5 observed years and all 5 variants, with 2025 included as the supervised target. Used for ALL score forecasting and counterfactual STGNN inference in Views 1-4.
+- NEVER mix these two models. NEVER report A7b metrics as test performance (no test set exists).
+
+## ON-THE-FLY PILLAR COMPUTATION PATTERN — CRITICAL
+All pillar score computations in the API use frozen pipeline artifacts loaded at startup:
+  backend/artifacts/minmax_scaler.pkl   → MinMax scaler (Phase A2, CVAE input scaling only)
+  backend/artifacts/standard_scaler.pkl → StandardScaler (Phase A4/A5, PCA + pillar scoring)
+  backend/artifacts/pca_loadings.npy    → W matrix (Phase A4)
+  backend/artifacts/pillar_weights.pkl  → w_jk, s_k, J_k (Phase A5)
+  backend/artifacts/score_params.pkl    → P̄_k, σ_Pk, alpha_k, I_min, I_max, SCORE_MIN/MAX (Phase A5)
+NEVER read pillar_scores_augmented.csv at API time. ALWAYS apply the frozen transform chain.
+
+## MATHEMATICAL PRECISION RULES
+- VAE reparameterization: z = mu + sigma * eps, eps ~ N(0,I). NEVER skip this, NEVER use z = mu directly.
+- KL loss: (1/2) * sum(mu^2 + sigma^2 - log(sigma^2) - 1). Use the closed form, not a library approximation.
+- Graph adjacency normalization: A_tilde = D_hat^{-0.5} @ A_hat @ D_hat^{-0.5}. Always add self-loops before normalizing.
+- Attention scaling: divide by sqrt(d_key) inside softmax. Never omit this.
+- Sustainability score final rescaling: I* = SCORE_MIN + (SCORE_MAX - SCORE_MIN) * (I - I_min) / (I_max - I_min), with SCORE_MIN=0 and SCORE_MAX=100 for the prototype. Always round to 1 decimal.
+
+## WHEN WRITING NEW CODE
+1. Check if the relevant pipeline phase file already exists before creating a new one
+2. Check backend/data/ for available CSV files before generating synthetic data
+3. Always print a summary log after each pipeline phase completes (shape, key stats)
+4. If a .pt model file exists in backend/models/, load it — do not retrain unless asked
+
+## WHEN WRITING REACT COMPONENTS
+- Use functional components with hooks only, no class components
+- Recharts for all charts (LineChart, RadarChart, BarChart, ResponsiveContainer)
+- Tailwind utility classes only — no custom CSS files
+- Fetch from http://localhost:8000/api/* — hardcode this base URL in a single config.js file
+- All API calls use async/await with try/catch — always show a loading spinner and error state
+
+## FORBIDDEN ACTIONS
+- Never use localStorage or sessionStorage
+- Never install pytorch-lightning (use raw PyTorch loops)
+- Never use Flask (use FastAPI only)
+- Never hardcode pillar assignments — they must emerge from PCA loading analysis
+- Never fake the counterfactual endpoint — it must run the full chain: raw δ on latest real 2025 features → pillar recomputation → persistent pillar shift → STGNN forward pass
+- Never pass 17 raw features as STGNN node input — always F=5 (4 pillars + lag)
+- Never treat CVAE synthetic variants as extra timesteps — they are augmented graph snapshots of the same year
+- Never evaluate model performance on synthetic rows — always real data only (variant_id=0)
+- Never use stgnn_eval_weights.pt for forecasting or counterfactuals — it is for metrics reporting only
+- Never use stgnn_forecast_weights.pt to report test metrics — it has no held-out set
+- Never read stale CSV pillar scores in the API — always compute on the fly from frozen pipeline artifacts
+- Never call /api/pillars/preview from the Run Simulation flow — it is slider-only, lightweight, pre-simulation
+- Never fake roadmap modules from the concept document as implemented features

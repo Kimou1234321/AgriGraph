@@ -1,0 +1,27 @@
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# Node artifacts
+node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Model weights (large binary files — don't index)
+backend/models/*.pt
+backend/models/*.pth
+
+# Large data files (don't index the raw CSVs as code)
+backend/data/*.csv
+
+# System files
+.DS_Store
+.env
+*.log
