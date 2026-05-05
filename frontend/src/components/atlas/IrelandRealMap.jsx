@@ -8,7 +8,7 @@ const CONSTANTS = {
   MAP_CENTER_LON: -8,
   MAP_CENTER_LAT: 53.35,
   MAP_SCALE_ATLAS: 7200,
-  MAP_SCALE_MINI: 5200,
+  MAP_SCALE_MINI: 6000,
 };
 
 const countiesTopoObject = {
@@ -39,7 +39,7 @@ export default function IrelandRealMap({
   className = "",
 }) {
   const scale = variant === "mini" ? CONSTANTS.MAP_SCALE_MINI : CONSTANTS.MAP_SCALE_ATLAS;
-  const height = variant === "mini" ? 220 : "100%";
+  const height = variant === "mini" ? 340 : "100%";
 
   return (
     <ComposableMap
@@ -73,7 +73,7 @@ export default function IrelandRealMap({
                   selected ? "stroke-emerald-700 dark:stroke-emerald-400" : ""
                 }`}
                 style={{
-                  default: { strokeWidth: selected ? 1.25 : 0.65, outline: "none" },
+                  default: { strokeWidth: selected ? 1.35 : variant === "mini" ? 0.85 : 0.65, outline: "none" },
                   hover: { strokeWidth: 1.1, outline: "none" },
                   pressed: { outline: "none" },
                 }}
@@ -92,7 +92,7 @@ export default function IrelandRealMap({
             variant === "mini" && Number.isFinite(score)
               ? tierMarkerClass(score)
               : "fill-white stroke-slate-600 dark:fill-slate-700 dark:stroke-slate-300";
-          const r = selected ? 7 : 5;
+          const r = variant === "mini" ? (selected ? 8.5 : 6.5) : selected ? 7 : 5;
           return (
             <Marker key={county} coordinates={[lon, lat]}>
               <g
@@ -110,7 +110,11 @@ export default function IrelandRealMap({
                   }
                 }}
               >
-                <circle r={r} className={`${colorClasses}`} strokeWidth={selected ? 2.2 : 1.2} />
+                <circle
+                  r={r}
+                  className={`${colorClasses}`}
+                  strokeWidth={selected ? (variant === "mini" ? 2.5 : 2.2) : variant === "mini" ? 1.65 : 1.2}
+                />
               </g>
             </Marker>
           );

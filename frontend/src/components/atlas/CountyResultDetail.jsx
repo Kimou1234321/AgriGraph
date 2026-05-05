@@ -11,11 +11,16 @@ export default function CountyResultDetail({ block, glass = false }) {
   const axisStroke = isDark ? "#64748b" : "#94a3b8";
   const tickFill = isDark ? "#9FB0C3" : "#475569";
 
-  const lineData = (block?.baseline ?? []).map((row, index) => ({
-    year: row.year,
-    baseline: Number(row.score),
-    counterfactual: Number(block?.counterfactual?.[index]?.score ?? row.score),
-  }));
+  const lineData = (block?.baseline ?? []).map((row, index) => {
+    const baseline = Number(row.score);
+    const counterfactual = Number(block?.counterfactual?.[index]?.score ?? row.score);
+    return {
+      year: row.year,
+      baseline,
+      counterfactual,
+      uplift: Number((counterfactual - baseline).toFixed(2)),
+    };
+  });
   const upliftData = (block?.uplift ?? []).map((row) => ({ year: row.year, delta: Number(row.delta) }));
   const shifts = block?.pillar_shifts ?? { P1: 0, P2: 0, P3: 0, P4: 0 };
   const radarBefore = { P1: 0, P2: 0, P3: 0, P4: 0 };

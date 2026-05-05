@@ -41,13 +41,17 @@ CONSTANTS: dict[str, Any] = {
     "OOD_PILLAR_WEIGHT": 0.45,
     "OOD_LAG_WEIGHT": 0.25,
     "OOD_SCORE_WEIGHT": 0.30,
-    "OOD_MEDIUM_THRESHOLD": 1.0,
-    "OOD_HIGH_THRESHOLD": 1.6,
-    "BLEND_WEIGHT_LOW": 0.85,
-    "BLEND_WEIGHT_MEDIUM": 0.55,
-    "BLEND_WEIGHT_HIGH": 0.25,
-    "FAILSAFE_HIGH_RISK_RATIO": 0.50,
-    "FAILSAFE_INVALID_RATIO": 0.25,
+    # OOD tiers: raised slightly so routine multi-year extrapolation stays in low/medium blend,
+    # not forced toward linear fallback.
+    "OOD_MEDIUM_THRESHOLD": 1.15,
+    "OOD_HIGH_THRESHOLD": 2.25,
+    # Weight on *raw* STGNN output in convex blend with linear fallback (higher = trust model more).
+    "BLEND_WEIGHT_LOW": 0.92,
+    "BLEND_WEIGHT_MEDIUM": 0.72,
+    "BLEND_WEIGHT_HIGH": 0.48,
+    # Fail-safe: only full-grid replacement when many nodes are non-finite/out-of-range.
+    # High OOD is handled by adaptive_blend_with_fallback only — no second hard replace by OOD.
+    "FAILSAFE_INVALID_RATIO": 0.35,
     "SCORE_MIN": 0.0,
     "SCORE_MAX": 100.0,
     "FIRST_YEAR_LAG_ZERO": 2021,
@@ -351,20 +355,25 @@ def apply_temporal_rate_limits(
 def apply_fail_safe_policy(
     scores: np.ndarray,
     fallback_scores: np.ndarray,
-    ood_scores: np.ndarray,
+    _ood_scores: np.ndarray,
     invalid_mask: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, str]:
-    """Apply year-level fail-safe replacement policy and return affected mask."""
-    high_mask = ood_scores >= CONSTANTS["OOD_HIGH_THRESHOLD"]
-    high_ratio = float(np.mean(high_mask))
+    """Replace only invalid (non-finite / out-of-domain) nodes with fallback.
+
+    High OOD risk is already absorbed by ``adaptive_blend_with_fallback``; we do not
+    hard-replace finite predictions again based on OOD, so trajectories do not collapse
+    onto the linear trend baseline after blending.
+    """
     invalid_ratio = float(np.mean(invalid_mask))
-    affected = high_mask | invalid_mask
     mode = "normal"
-    if invalid_ratio >= CONSTANTS["FAILSAFE_INVALID_RATIO"] or high_ratio >= CONSTANTS["FAILSAFE_HIGH_RISK_RATIO"]:
+    if invalid_ratio >= CONSTANTS["FAILSAFE_INVALID_RATIO"]:
         mode = "safe"
-        affected = np.ones_like(affected, dtype=bool)
-    elif np.any(affected):
+        affected = np.ones_like(invalid_mask, dtype=bool)
+    elif np.any(invalid_mask):
         mode = "degraded"
+        affected = invalid_mask.copy()
+    else:
+        affected = np.zeros_like(invalid_mask, dtype=bool)
     out = scores.copy()
     out[affected] = fallback_scores[affected]
     return out, affected, mode
@@ -479,7 +488,16 @@ def run_forecast() -> None:
         )
         for i, county in enumerate(counties):
             predicted_rows.append(
-                {"county": county, "year": fy, "predicted_score": float(round(y_hat[i], 1))}
+                {
+                    "county": county,
+                    "year": fy,
+                    "predicted_score": float(round(y_hat[i], 1)),
+                    "blend_weight": float(round(blend_w[i], 4)),
+                    "ood_score": float(round(ood_scores[i], 4)),
+                    "fallback_score": float(round(fallback_scores[i], 1)),
+                    "forecast_policy": mode,
+                    "raw_stgnn_score": float(round(y_hat_raw[i], 1)),
+                }
             )
         for i, county in enumerate(counties):
             pillar_forecast_rows.append(

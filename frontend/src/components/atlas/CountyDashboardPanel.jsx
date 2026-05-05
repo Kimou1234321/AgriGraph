@@ -49,8 +49,11 @@ export default function CountyDashboardPanel({
         {pillarKeys.map((key) => (
           <ChartPanel key={key} variant={chartVariant} title={key.replaceAll("_norm", "").replaceAll("_", " ")}>
             <SustainabilityChart
-              mode="counterfactual"
-              data={pillars.map((row) => ({ year: row.year, baseline: row[key], counterfactual: null }))}
+              mode="pillarTrend"
+              data={pillars.map((row) => ({
+                year: row.year,
+                value: Number(row[key] ?? 0),
+              }))}
             />
           </ChartPanel>
         ))}

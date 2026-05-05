@@ -173,26 +173,7 @@ export default function BenchmarksView({
       <div className="rounded-xl border border-slate-200 bg-white p-4 dark:border-dark-border dark:bg-dark-surface">
         <h2 className="mb-4 text-xl font-semibold text-slate-900 dark:text-dark-text-primary">Benchmarks</h2>
 
-        <div className="mb-4 w-full max-w-md space-y-1">
-          <div className="flex items-center justify-between text-xs text-slate-600 dark:text-dark-text-secondary">
-            <span>2021</span>
-            <span className="rounded-full bg-emerald-50 px-2 py-0.5 font-semibold text-emerald-700 dark:bg-emerald-950/50 dark:text-dark-accent">
-              {selectedYear}
-            </span>
-            <span>2036</span>
-          </div>
-          <input
-            type="range"
-            min={2021}
-            max={2036}
-            step={1}
-            value={selectedYear}
-            onChange={(event) => setSelectedYear(Number(event.target.value))}
-            className="w-full"
-          />
-        </div>
-
-        <div className="mb-4">
+        <div className="mb-5">
           <MiniMapNodes
             counties={counties}
             selectedCounty={selectedCounty}
@@ -205,7 +186,7 @@ export default function BenchmarksView({
           />
         </div>
 
-        <div className="mb-4 grid gap-3 md:grid-cols-2 lg:grid-cols-4">
+        <div className="mb-6 grid gap-3 md:grid-cols-2 lg:grid-cols-4">
           <NationalKpiPanel
             stack={false}
             average={rankedStats.average}
@@ -219,11 +200,39 @@ export default function BenchmarksView({
           />
         </div>
 
-        {simulationResults ? (
-          <div className="mb-4 flex justify-center">
-            <SimToggle value={viewMode} onChange={setViewMode} />
+        <div className="rounded-lg border border-slate-100 bg-slate-50/80 p-4 dark:border-dark-border dark:bg-dark-bg/40">
+          {simulationResults ? (
+            <div className="mb-4 flex justify-center">
+              <SimToggle value={viewMode} onChange={setViewMode} />
+            </div>
+          ) : null}
+
+          <div
+            className="mx-auto w-full max-w-xl space-y-1.5"
+            aria-label="Year selector for map and regional table"
+          >
+            <div className="flex items-center justify-between text-xs text-slate-600 dark:text-dark-text-secondary">
+              <span>2021</span>
+              <span className="rounded-full bg-emerald-50 px-2.5 py-0.5 font-semibold text-emerald-700 dark:bg-emerald-950/50 dark:text-dark-accent">
+                {selectedYear}
+              </span>
+              <span>2036</span>
+            </div>
+            <input
+              type="range"
+              min={2021}
+              max={2036}
+              step={1}
+              value={selectedYear}
+              onChange={(event) => setSelectedYear(Number(event.target.value))}
+              className="h-2 w-full cursor-pointer accent-emerald-700 dark:accent-dark-accent"
+            />
+            <p className="text-center text-xs text-slate-500 dark:text-dark-text-secondary">
+              Use Initial / Simulation (when available) and the year control to refresh the map and KPIs above and the regional
+              table below.
+            </p>
           </div>
-        ) : null}
+        </div>
       </div>
 
       <div className="rounded-xl border border-slate-200 bg-white p-4 dark:border-dark-border dark:bg-dark-surface">
