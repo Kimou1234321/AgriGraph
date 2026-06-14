@@ -1,9 +1,0 @@
-{
-  "mcpServers": {
-    "filesystem": {
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "."],
-      "description": "Lets the agent read/write project files directly"
-    }
-  }
-}

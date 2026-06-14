@@ -8,15 +8,76 @@ const CONSTANTS = {
   SCORE_MID_THRESHOLD: 50,
 };
 
-async function requestJson(path, options) {
+async function parseError(response) {
+  try {
+    const payload = await response.json();
+    if (typeof payload.detail === "string") return payload.detail;
+    if (Array.isArray(payload.detail)) return payload.detail.map((item) => item.msg).join(", ");
+    if (payload.error) return payload.error;
+  } catch {
+    // ignore parse failure
+  }
+  return `API failed with status ${response.status}.`;
+}
+
+async function requestJson(path, options = {}) {
   const response = await fetch(`${API_BASE_URL}${path}`, {
     cache: "no-store",
+    credentials: "include",
     ...options,
+    headers: {
+      ...(options.headers || {}),
+    },
   });
   if (!response.ok) {
-    throw new Error(`API ${path} failed with status ${response.status}.`);
+    throw new Error(await parseError(response));
   }
+  if (response.status === 204) return null;
   return response.json();
+}
+
+export async function signup(payload) {
+  return requestJson("/auth/signup", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function login(payload) {
+  return requestJson("/auth/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function logout() {
+  return requestJson("/auth/logout", { method: "POST" });
+}
+
+export async function fetchMe() {
+  return requestJson("/auth/me");
+}
+
+export async function saveSimulation(payload) {
+  return requestJson("/simulations", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function fetchSavedSimulations() {
+  return requestJson("/simulations");
+}
+
+export async function fetchSavedSimulation(id) {
+  return requestJson(`/simulations/${encodeURIComponent(id)}`);
+}
+
+export async function deleteSavedSimulation(id) {
+  return requestJson(`/simulations/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
 export async function fetchCounties() {

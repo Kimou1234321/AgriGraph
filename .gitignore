@@ -38,9 +38,6 @@ backend/data/pillar_scores_augmented.csv
 backend/data/forecast_results.csv
 backend/data/uncertainty_bands.csv
 
-#---docs---
-docs/
-
 # --- Jupyter ---
 .ipynb_checkpoints/
 

@@ -17,7 +17,6 @@ CONSTANTS: dict[str, Any] = {
     "PCA_LOADINGS_FILENAME": "pca_loadings.npy",
     "PILLAR_WEIGHTS_FILENAME": "pillar_weights.pkl",
     "SCORE_PARAMS_FILENAME": "score_params.pkl",
-    "LAG_NORM_FILENAME": "lag_norm.pkl",
     "EDGE_INDEX_FILENAME": "edge_index.pt",
     "COUNTIES_FILENAME": "graph_counties.pkl",
     "N_PILLARS": 4,
@@ -54,8 +53,6 @@ def load_frozen_transforms() -> dict[str, Any]:
         pillar_weights = pickle.load(file)
     with (base / CONSTANTS["SCORE_PARAMS_FILENAME"]).open("rb") as file:
         score_params = pickle.load(file)
-    with (base / CONSTANTS["LAG_NORM_FILENAME"]).open("rb") as file:
-        lag_norm = pickle.load(file)
     edge_index = torch.load(base / CONSTANTS["EDGE_INDEX_FILENAME"], map_location="cpu")
     if not isinstance(edge_index, torch.Tensor):
         edge_index = torch.as_tensor(edge_index)
@@ -66,7 +63,6 @@ def load_frozen_transforms() -> dict[str, Any]:
         "pca_loadings": pca_loadings,
         "pillar_weights": pillar_weights,
         "score_params": score_params,
-        "lag_norm": lag_norm,
         "edge_index": edge_index.long(),
         "counties": list(counties),
     }
@@ -96,21 +92,42 @@ def raw_to_pillars(x_norm_row: np.ndarray, frozen: dict[str, Any]) -> np.ndarray
     return standardized
 
 
+def _score_params_from_frozen(frozen: dict[str, Any]) -> tuple[float, float, float, float, float, int]:
+    """Extract min-max score calibration constants from frozen artifacts."""
+    params = frozen["score_params"]
+    i_min = float(params["I_min"])
+    i_max = float(params["I_max"])
+    score_min = float(params.get("SCORE_MIN", 0.0))
+    score_max = float(params.get("SCORE_MAX", 100.0))
+    fallback = float(params.get("SCORE_FALLBACK", 50.0))
+    round_decimals = int(params.get("SCORE_ROUND_DECIMALS", 1))
+    return i_min, i_max, score_min, score_max, fallback, round_decimals
+
+
 def pillars_to_score(
     s_row: np.ndarray,
     frozen: dict[str, Any],
 ) -> float:
-    """Map standardized pillar vector to rescaled sustainability score I* in [SCORE_MIN, SCORE_MAX]."""
-    s_vec = np.asarray(s_row, dtype=np.float64).reshape(-1)
-    if s_vec.shape[0] != CONSTANTS["N_PILLARS"]:
-        raise ValueError(f"Expected {CONSTANTS['N_PILLARS']} pillars, got {s_vec.shape[0]}")
-    params = frozen["score_params"]
-    alpha = np.asarray(params["alpha_k"], dtype=np.float64)
-    index_val = float(np.dot(s_vec, alpha))
-    i_min = float(params["I_min"])
-    i_max = float(params["I_max"])
-    score_min = float(params["SCORE_MIN"])
-    score_max = float(params["SCORE_MAX"])
-    denom = max(i_max - i_min, CONSTANTS["EPSILON"])
-    score = score_min + (score_max - score_min) * (index_val - i_min) / denom
-    return float(np.round(score, int(params.get("SCORE_ROUND_DECIMALS", 1))))
+    """Map standardized pillar vector to rescaled sustainability score I* in [0, 100]."""
+    scores = pillar_matrix_to_scores(s_row.reshape(1, -1), frozen)
+    return float(scores[0])
+
+
+def pillar_matrix_to_scores(
+    pillar_matrix: np.ndarray,
+    frozen: dict[str, Any],
+) -> np.ndarray:
+    """Derive sustainability scores from pillar matrix using simple average and min-max scaling."""
+    pillars = np.asarray(pillar_matrix, dtype=np.float64)
+    if pillars.ndim == 1:
+        pillars = pillars.reshape(1, -1)
+    if pillars.shape[1] != CONSTANTS["N_PILLARS"]:
+        raise ValueError(f"Expected {CONSTANTS['N_PILLARS']} pillars, got {pillars.shape[1]}")
+    i_min, i_max, score_min, score_max, fallback, round_decimals = _score_params_from_frozen(frozen)
+    index_values = pillars.mean(axis=1)
+    if abs(i_max - i_min) <= CONSTANTS["EPSILON"]:
+        scores = np.full(pillars.shape[0], fallback, dtype=np.float64)
+    else:
+        scores = score_max * (index_values - i_min) / (i_max - i_min)
+        scores = np.clip(scores, score_min, score_max)
+    return np.round(scores, round_decimals)

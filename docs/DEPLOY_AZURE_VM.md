@@ -1,5 +1,8 @@
 # Deploy AgriGraph on an Ubuntu Azure VM (beginner walkthrough)
 
+> **Start here:** [`docs/DEPLOYMENT.md`](DEPLOYMENT.md) is the main step-by-step guide (GitHub, Postgres, auth, nginx, systemd).  
+> This file is **extended reference** for nginx/systemd details from the original first-time deploy walkthrough.
+
 This guide assumes:
 
 - **VM OS:** Ubuntu 22.04 (e.g. `azureuser@...`)

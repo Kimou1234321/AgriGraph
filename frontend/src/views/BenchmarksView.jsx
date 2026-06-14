@@ -42,18 +42,19 @@ export default function BenchmarksView({
   setActiveTab,
   simulationResults,
   setAtlasCountyConfirmed,
+  viewMode,
+  setViewMode,
 }) {
   const [query, setQuery] = useState("");
   const [pillarWeakness, setPillarWeakness] = useState({});
   const [sortBy, setSortBy] = useState("score_2036");
   const [sortDir, setSortDir] = useState("desc");
   const [page, setPage] = useState(1);
-  const [viewMode, setViewMode] = useState("initial");
   const pageSize = 10;
 
   useEffect(() => {
     if (!simulationResults) setViewMode("initial");
-  }, [simulationResults]);
+  }, [simulationResults, setViewMode]);
 
   useEffect(() => {
     setSortBy(viewMode === "simulation" ? "score_selected" : "score_2036");

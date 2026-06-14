@@ -5,7 +5,7 @@ import ErrorState from "../components/ErrorState";
 import LoadingState from "../components/LoadingState";
 import { useIsDark } from "../hooks/useIsDark";
 
-export default function MethodologyView() {
+export default function MethodologyView({ onBack }) {
   const isDark = useIsDark();
   const [metrics, setMetrics] = useState(null);
   const [error, setError] = useState("");
@@ -55,11 +55,40 @@ export default function MethodologyView() {
 
   return (
     <section className="space-y-4">
-      <div className={cardShell}>
-        <h2 className={`text-xl font-semibold ${headingPrimary}`}>Methodology</h2>
-        <p className={`mt-2 text-sm ${bodyText}`}>
-          ICBF Data → CVAE Augmentation → PCA Pillars → Sustainability Score → STGNN Forecast → Counterfactual Simulation
-        </p>
+      <div className={`${cardShell} relative overflow-hidden`}>
+        <div className="absolute inset-0 bg-gradient-to-r from-emerald-50/80 to-transparent dark:from-emerald-950/30" />
+        <div className="relative">
+          {onBack ? (
+            <button
+              type="button"
+              onClick={onBack}
+              className="mb-4 inline-flex items-center gap-1 rounded-lg bg-emerald-700 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-800 dark:bg-emerald-600 dark:hover:bg-emerald-500"
+            >
+              <span className="material-symbols-outlined text-base">arrow_back</span>
+              Back to app
+            </button>
+          ) : null}
+          <h2 className={`text-2xl font-bold ${headingPrimary}`}>Methodology</h2>
+          <p className={`mt-2 max-w-3xl text-sm ${bodyText}`}>
+            End-to-end county sustainability pipeline: real ICBF indicators are augmented with a sequence-aware CVAE,
+            converted into four PCA pillars, forecast with a lightweight STGNN, and explored through counterfactual
+            simulations.
+          </p>
+          <ol className={`mt-4 grid gap-2 text-sm md:grid-cols-2 ${bodyText}`}>
+            <li className="rounded-lg border border-slate-200 bg-white/70 px-3 py-2 dark:border-dark-border dark:bg-dark-surface/60">
+              1. ICBF clean panel and normalization
+            </li>
+            <li className="rounded-lg border border-slate-200 bg-white/70 px-3 py-2 dark:border-dark-border dark:bg-dark-surface/60">
+              2. Windowed CVAE augmentation
+            </li>
+            <li className="rounded-lg border border-slate-200 bg-white/70 px-3 py-2 dark:border-dark-border dark:bg-dark-surface/60">
+              3. PCA pillars and derived score
+            </li>
+            <li className="rounded-lg border border-slate-200 bg-white/70 px-3 py-2 dark:border-dark-border dark:bg-dark-surface/60">
+              4. STGNN pillar forecast and counterfactuals
+            </li>
+          </ol>
+        </div>
       </div>
 
       {loading ? <LoadingState label="Loading A7 evaluation metrics..." /> : null}

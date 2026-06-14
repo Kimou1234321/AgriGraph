@@ -1,4 +1,4 @@
-"""Phase A3 year-conditioned CVAE training and augmentation."""
+"""Phase A3 windowed-sequence CVAE training and augmentation."""
 
 from __future__ import annotations
 
@@ -29,20 +29,21 @@ CONSTANTS: dict[str, Any] = {
     "EXPECTED_VARIANTS": [0, 1, 2, 3, 4],
     "REAL_VARIANT_ID": 0,
     "FIRST_SYNTHETIC_VARIANT_ID": 1,
+    "WINDOW_LEN": 2,
     "INPUT_DIM": 17,
-    "CONDITION_DIM": 5,
-    "ENCODER_INPUT_DIM": 22,
-    "LATENT_DIM": 80,
-    "DECODER_INPUT_DIM": 85,
-    "HIDDEN_DIM": 128,
-    "ENCODER_OUTPUT_DIM": 160,
+    "FLAT_WINDOW_DIM": 34,
+    "CONDITION_DIM": 4,
+    "ENCODER_INPUT_DIM": 38,
+    "LATENT_DIM": 32,
+    "DECODER_INPUT_DIM": 36,
+    "HIDDEN_DIM": 64,
+    "ENCODER_OUTPUT_DIM": 64,
     "BETA": 1.0,
     "LEARNING_RATE": 1e-3,
     "EPOCHS": 200,
-    "BATCH_SIZE": 32,
+    "BATCH_SIZE": 16,
     "SYNTHETIC_PER_REAL": 4,
     "SEED": 42,
-    # Max Frobenius norm of (real_corr - synth_corr) per year; 17×17 correlations often land ~5–6 when means match.
     "CORRELATION_NORM_THRESHOLD": 7.0,
     "MEAN_ABS_DIFF_THRESHOLD": 0.05,
     "LOG_INTERVAL": 25,
@@ -72,8 +73,8 @@ CONSTANTS: dict[str, Any] = {
 }
 
 
-class YearConditionedCVAE(nn.Module):
-    """Year-conditioned CVAE with the exact A3 architecture."""
+class WindowedSequenceCVAE(nn.Module):
+    """Windowed sequence CVAE: encodes/decodes ordered (window_len, 17) county windows."""
 
     def __init__(self) -> None:
         """Initialize encoder and decoder layers."""
@@ -86,13 +87,14 @@ class YearConditionedCVAE(nn.Module):
         self.decoder = nn.Sequential(
             nn.Linear(CONSTANTS["DECODER_INPUT_DIM"], CONSTANTS["HIDDEN_DIM"]),
             nn.ReLU(),
-            nn.Linear(CONSTANTS["HIDDEN_DIM"], CONSTANTS["INPUT_DIM"]),
+            nn.Linear(CONSTANTS["HIDDEN_DIM"], CONSTANTS["FLAT_WINDOW_DIM"]),
             nn.Sigmoid(),
         )
 
-    def encode(self, x_values: Tensor, conditions: Tensor) -> tuple[Tensor, Tensor]:
-        """Encode normalized features and year condition into mu and log variance."""
-        encoded = self.encoder(torch.cat([x_values, conditions], dim=1))
+    def encode(self, x_windows: Tensor, conditions: Tensor) -> tuple[Tensor, Tensor]:
+        """Encode flattened window and year-position condition into mu and log variance."""
+        flat = x_windows.reshape(x_windows.shape[0], -1)
+        encoded = self.encoder(torch.cat([flat, conditions], dim=1))
         mu, log_sigma_squared = torch.chunk(encoded, chunks=2, dim=1)
         return mu, log_sigma_squared
 
@@ -103,12 +105,13 @@ class YearConditionedCVAE(nn.Module):
         return mu + sigma * epsilon
 
     def decode(self, z_values: Tensor, conditions: Tensor) -> Tensor:
-        """Decode latent samples and year condition into normalized features."""
-        return self.decoder(torch.cat([z_values, conditions], dim=1))
+        """Decode latent sample into a window tensor (batch, window_len, 17)."""
+        flat = self.decoder(torch.cat([z_values, conditions], dim=1))
+        return flat.reshape(-1, CONSTANTS["WINDOW_LEN"], CONSTANTS["INPUT_DIM"])
 
-    def forward(self, x_values: Tensor, conditions: Tensor) -> tuple[Tensor, Tensor, Tensor]:
-        """Run full CVAE forward pass."""
-        mu, log_sigma_squared = self.encode(x_values, conditions)
+    def forward(self, x_windows: Tensor, conditions: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        """Run full windowed CVAE forward pass."""
+        mu, log_sigma_squared = self.encode(x_windows, conditions)
         z_values = self.reparameterize(mu, log_sigma_squared)
         reconstruction = self.decode(z_values, conditions)
         return reconstruction, mu, log_sigma_squared
@@ -117,7 +120,7 @@ class YearConditionedCVAE(nn.Module):
 def _print_phase_header() -> None:
     """Print a readable phase header."""
     print("\n" + "=" * 72)
-    print(f"[{CONSTANTS['PHASE']}] CONDITIONAL VAE DATA AUGMENTATION")
+    print(f"[{CONSTANTS['PHASE']}] WINDOWED SEQUENCE CVAE DATA AUGMENTATION")
     print("=" * 72)
 
 
@@ -167,26 +170,57 @@ def _validate_normalized_panel(df: pd.DataFrame) -> None:
     print(f"[A3] Normalized panel validated: shape={df.shape}, range=[{min_value:.4f}, {max_value:.4f}].")
 
 
-def _build_year_condition(years: pd.Series) -> Tensor:
-    """Convert years into one-hot condition tensor."""
+def _year_position_condition(start_year: int) -> Tensor:
+    """Build one-hot start-year position within the sliding window index space."""
     year_to_index = {year: idx for idx, year in enumerate(CONSTANTS["EXPECTED_YEARS"])}
-    indices = [year_to_index[int(year)] for year in years.tolist()]
+    num_classes = len(CONSTANTS["EXPECTED_YEARS"]) - CONSTANTS["WINDOW_LEN"] + 1
+    index = year_to_index[int(start_year)]
+    if index >= num_classes:
+        raise ValueError(f"[A3] Invalid window start year {start_year} for window_len={CONSTANTS['WINDOW_LEN']}.")
     return torch.nn.functional.one_hot(
-        torch.tensor(indices, dtype=torch.long),
-        num_classes=CONSTANTS["CONDITION_DIM"],
+        torch.tensor(index, dtype=torch.long),
+        num_classes=num_classes,
     ).float()
 
 
-def _build_training_tensors(df: pd.DataFrame) -> tuple[Tensor, Tensor]:
-    """Build CVAE feature and condition tensors."""
-    x_tensor = torch.tensor(df[CONSTANTS["FEATURE_COLS"]].to_numpy(dtype=np.float32), dtype=torch.float32)
-    condition_tensor = _build_year_condition(df["year"])
-    return x_tensor, condition_tensor
+def _build_sequence_windows(df: pd.DataFrame) -> tuple[Tensor, Tensor, list[dict[str, Any]]]:
+    """Build ordered per-county sliding windows for CVAE training."""
+    windows: list[np.ndarray] = []
+    conditions: list[Tensor] = []
+    metadata: list[dict[str, Any]] = []
+    window_len = CONSTANTS["WINDOW_LEN"]
+
+    for county, county_df in df.groupby("county", sort=True):
+        county_df = county_df.sort_values("year").reset_index(drop=True)
+        years = county_df["year"].astype(int).tolist()
+        features = county_df[CONSTANTS["FEATURE_COLS"]].to_numpy(dtype=np.float32)
+        for start_idx in range(len(years) - window_len + 1):
+            end_idx = start_idx + window_len
+            window_years = years[start_idx:end_idx]
+            window_arr = features[start_idx:end_idx, :]
+            windows.append(window_arr)
+            conditions.append(_year_position_condition(window_years[0]))
+            metadata.append(
+                {
+                    "county": str(county),
+                    "start_year": int(window_years[0]),
+                    "years": [int(y) for y in window_years],
+                }
+            )
+
+    x_tensor = torch.tensor(np.stack(windows, axis=0), dtype=torch.float32)
+    condition_tensor = torch.stack(conditions, dim=0)
+    print(
+        f"[A3] Built sequence windows: shape={tuple(x_tensor.shape)}, "
+        f"counties={CONSTANTS['EXPECTED_COUNTIES']}, windows_per_county="
+        f"{len(metadata) // CONSTANTS['EXPECTED_COUNTIES']}"
+    )
+    return x_tensor, condition_tensor, metadata
 
 
 def _cvae_loss(reconstruction: Tensor, x_values: Tensor, mu: Tensor, log_sigma_squared: Tensor) -> Tensor:
     """Compute L = mean(||x-xhat||^2 + beta * KL) with closed-form KL."""
-    reconstruction_term = torch.sum((x_values - reconstruction) ** 2, dim=1)
+    reconstruction_term = torch.sum((x_values - reconstruction) ** 2, dim=(1, 2))
     sigma_squared = torch.exp(log_sigma_squared)
     kl_term = CONSTANTS["BETA"] * 0.5 * torch.sum(
         (mu**2) + sigma_squared - log_sigma_squared - CONSTANTS["KL_OFFSET"],
@@ -195,18 +229,21 @@ def _cvae_loss(reconstruction: Tensor, x_values: Tensor, mu: Tensor, log_sigma_s
     return torch.mean(reconstruction_term + kl_term)
 
 
-def _train_cvae(x_tensor: Tensor, condition_tensor: Tensor) -> tuple[YearConditionedCVAE, list[dict[str, float]]]:
-    """Train the year-conditioned CVAE with Adam."""
-    model = YearConditionedCVAE()
+def _train_cvae(
+    x_tensor: Tensor,
+    condition_tensor: Tensor,
+) -> tuple[WindowedSequenceCVAE, list[dict[str, float]]]:
+    """Train the windowed sequence CVAE with Adam."""
+    model = WindowedSequenceCVAE()
     optimizer = torch.optim.Adam(model.parameters(), lr=CONSTANTS["LEARNING_RATE"])
     dataset = TensorDataset(x_tensor, condition_tensor)
     data_loader = DataLoader(dataset, batch_size=CONSTANTS["BATCH_SIZE"], shuffle=True)
     history: list[dict[str, float]] = []
 
     print(
-        "[A3] Training CVAE "
+        "[A3] Training windowed CVAE "
         f"epochs={CONSTANTS['EPOCHS']}, batch_size={CONSTANTS['BATCH_SIZE']}, "
-        f"lr={CONSTANTS['LEARNING_RATE']}, beta={CONSTANTS['BETA']}."
+        f"window_len={CONSTANTS['WINDOW_LEN']}, lr={CONSTANTS['LEARNING_RATE']}, beta={CONSTANTS['BETA']}."
     )
     for epoch in range(1, CONSTANTS["EPOCHS"] + 1):
         model.train()
@@ -245,18 +282,24 @@ def _create_real_variant_rows(df: pd.DataFrame) -> list[dict[str, Any]]:
     return rows
 
 
-def _generate_synthetic_rows(model: YearConditionedCVAE, df: pd.DataFrame) -> list[dict[str, Any]]:
-    """Generate four same-year synthetic rows for each real row."""
+def _generate_synthetic_rows(
+    model: WindowedSequenceCVAE,
+    df: pd.DataFrame,
+    window_metadata: list[dict[str, Any]],
+    x_tensor: Tensor,
+    condition_tensor: Tensor,
+) -> list[dict[str, Any]]:
+    """Generate temporally coherent synthetic windows and expand to row records."""
     model.eval()
     synthetic_rows: list[dict[str, Any]] = []
-    x_tensor, condition_tensor = _build_training_tensors(df)
+    county_year_variants: dict[tuple[str, int], dict[int, np.ndarray]] = {}
 
     with torch.no_grad():
         mu, log_sigma_squared = model.encode(x_tensor, condition_tensor)
-        for row_idx, source_row in df.iterrows():
-            source_condition = condition_tensor[row_idx].unsqueeze(0)
-            source_mu = mu[row_idx].unsqueeze(0)
-            source_log_sigma_squared = log_sigma_squared[row_idx].unsqueeze(0)
+        for win_idx, meta in enumerate(window_metadata):
+            source_condition = condition_tensor[win_idx].unsqueeze(0)
+            source_mu = mu[win_idx].unsqueeze(0)
+            source_log_sigma_squared = log_sigma_squared[win_idx].unsqueeze(0)
 
             for variant_id in range(
                 CONSTANTS["FIRST_SYNTHETIC_VARIANT_ID"],
@@ -269,23 +312,38 @@ def _generate_synthetic_rows(model: YearConditionedCVAE, df: pd.DataFrame) -> li
                     min=CONSTANTS["NORMALIZED_MIN"],
                     max=CONSTANTS["NORMALIZED_MAX"],
                 ).cpu().numpy()
-                synthetic_row = {
-                    "county": source_row["county"],
-                    "year": int(source_row["year"]),
-                    "variant_id": variant_id,
-                }
-                for feature_idx, feature in enumerate(CONSTANTS["FEATURE_COLS"]):
-                    synthetic_row[feature] = float(clipped[feature_idx])
-                synthetic_rows.append(synthetic_row)
+
+                for step_idx, year in enumerate(meta["years"]):
+                    key = (meta["county"], int(year))
+                    if key not in county_year_variants:
+                        county_year_variants[key] = {}
+                    county_year_variants[key][variant_id] = clipped[step_idx, :]
+
+    for (county, year), variant_map in county_year_variants.items():
+        for variant_id, feature_vec in variant_map.items():
+            synthetic_row: dict[str, Any] = {
+                "county": county,
+                "year": year,
+                "variant_id": variant_id,
+            }
+            for feature_idx, feature in enumerate(CONSTANTS["FEATURE_COLS"]):
+                synthetic_row[feature] = float(feature_vec[feature_idx])
+            synthetic_rows.append(synthetic_row)
 
     print(f"[A3] Generated synthetic rows: {len(synthetic_rows)}.")
     return synthetic_rows
 
 
-def _build_augmented_dataframe(model: YearConditionedCVAE, df: pd.DataFrame) -> pd.DataFrame:
+def _build_augmented_dataframe(
+    model: WindowedSequenceCVAE,
+    df: pd.DataFrame,
+    window_metadata: list[dict[str, Any]],
+    x_tensor: Tensor,
+    condition_tensor: Tensor,
+) -> pd.DataFrame:
     """Build augmented dataframe with real and synthetic variants."""
     rows = _create_real_variant_rows(df)
-    rows.extend(_generate_synthetic_rows(model, df))
+    rows.extend(_generate_synthetic_rows(model, df, window_metadata, x_tensor, condition_tensor))
     augmented_df = pd.DataFrame(rows)
     sort_columns = ["county", "year", "variant_id"]
     augmented_df = augmented_df.sort_values(sort_columns).reset_index(drop=True)
@@ -375,6 +433,7 @@ def _build_validation_summary(augmented_df: pd.DataFrame) -> dict[str, Any]:
     validation_summary["monotonic_county_variant_year_order"] = monotonic_ok
     validation_summary["year_values"] = sorted(augmented_df["year"].astype(int).unique().tolist())
     validation_summary["variant_values"] = sorted(augmented_df["variant_id"].astype(int).unique().tolist())
+    validation_summary["window_len"] = CONSTANTS["WINDOW_LEN"]
     print(f"[A3] Monotonic per-(county,variant) year ordering: {monotonic_ok}.")
     return validation_summary
 
@@ -418,7 +477,7 @@ def _build_real_only_fallback_augmented(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _save_outputs(
-    model: YearConditionedCVAE,
+    model: WindowedSequenceCVAE,
     history: list[dict[str, float]],
     augmented_df: pd.DataFrame,
     validation_summary: dict[str, Any],
@@ -455,13 +514,15 @@ def _save_outputs(
 
 
 def run_cvae_augmentation() -> pd.DataFrame:
-    """Run Phase A3 CVAE training, augmentation, validation, and persistence."""
+    """Run Phase A3 windowed CVAE training, augmentation, validation, and persistence."""
     _print_phase_header()
     _set_random_seeds()
     normalized_df = _load_normalized_panel()
-    x_tensor, condition_tensor = _build_training_tensors(normalized_df)
+    x_tensor, condition_tensor, window_metadata = _build_sequence_windows(normalized_df)
     model, history = _train_cvae(x_tensor, condition_tensor)
-    generated_augmented_df = _build_augmented_dataframe(model, normalized_df)
+    generated_augmented_df = _build_augmented_dataframe(
+        model, normalized_df, window_metadata, x_tensor, condition_tensor
+    )
     initial_validation = _build_validation_summary(generated_augmented_df)
     gate_passed, gate_failures = _passes_quality_gate(initial_validation)
     fallback_used = not gate_passed
@@ -490,4 +551,3 @@ def run_cvae_augmentation() -> pd.DataFrame:
     _save_outputs(model, history, augmented_df, validation_summary)
     print(f"[A3] Completed successfully. Final augmented shape: {augmented_df.shape}")
     return augmented_df
-

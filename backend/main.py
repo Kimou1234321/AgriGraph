@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -11,7 +12,10 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 
+from backend.api.auth_routes import router as auth_router
+from backend.api.database import init_db
 from backend.api.routes import router
+from backend.api.simulation_routes import router as simulation_router
 from backend.api.state import load_state
 from backend.pipeline.run_pipeline import run_pipeline
 
@@ -19,15 +23,23 @@ CONSTANTS: dict[str, Any] = {
     "APP_NAME": "AgriGraph AI API",
     "APP_VERSION": "0.1.0",
     "FRONTEND_ORIGIN": "http://localhost:5173",
+    "FRONTEND_ORIGIN_ENV": "FRONTEND_ORIGIN",
 }
 
 FORECAST_WEIGHTS = Path(__file__).resolve().parent / "models" / "stgnn_forecast_weights.pt"
 FORECAST_RESULTS = Path(__file__).resolve().parent / "data" / "forecast_2026_2036.csv"
 
 
+def _frontend_origins() -> list[str]:
+    """Return allowed CORS origins for cookie-based auth."""
+    origin = os.getenv(CONSTANTS["FRONTEND_ORIGIN_ENV"], CONSTANTS["FRONTEND_ORIGIN"])
+    return [origin]
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> Any:
     """Run startup checks and cache API state once."""
+    init_db()
     if not FORECAST_WEIGHTS.exists() or not FORECAST_RESULTS.exists():
         run_pipeline()
     app.state.cache = load_state()
@@ -41,7 +53,7 @@ app = FastAPI(
 )
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[CONSTANTS["FRONTEND_ORIGIN"]],
+    allow_origins=_frontend_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -60,6 +72,8 @@ async def disable_api_caching(
     return response
 
 
+app.include_router(auth_router)
+app.include_router(simulation_router)
 app.include_router(router)
 
 

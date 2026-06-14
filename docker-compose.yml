@@ -1,0 +1,16 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: agrigraph-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: agrigraph
+      POSTGRES_PASSWORD: agrigraph
+      POSTGRES_DB: agrigraph
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - agrigraph_pg_data:/var/lib/postgresql/data
+
+volumes:
+  agrigraph_pg_data:

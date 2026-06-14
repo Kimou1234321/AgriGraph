@@ -8,9 +8,10 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from backend.api.auth import get_current_user
 from backend.api.baselines import county_mean_baseline, linear_trend_baseline
 from backend.api.explanation import generate_explanation
 from backend.api.state import AppState
@@ -33,7 +34,7 @@ CONSTANTS: dict[str, Any] = {
     "PILLAR_CLIP_MAX": 3.0,
 }
 
-router = APIRouter(prefix=CONSTANTS["ROUTER_PREFIX"])
+router = APIRouter(prefix=CONSTANTS["ROUTER_PREFIX"], dependencies=[Depends(get_current_user)])
 
 
 class PreviewRequest(BaseModel):
@@ -315,7 +316,7 @@ async def get_metrics(request: Request) -> dict[str, Any]:
         "mse_norm": float(metrics.get("test_mse_norm", 0.0)),
         "eval_train_variants": metrics.get("eval_train_variants", []),
         "eval_test_variant": int(metrics.get("eval_test_variant", 0)),
-        "target_scaler": metrics.get("target_scaler", {}),
+        "target_scaler": metrics.get("pillar_target_scaler", metrics.get("target_scaler", {})),
     }
 
 

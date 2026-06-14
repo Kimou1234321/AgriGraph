@@ -1,4 +1,4 @@
-"""Phase A10 counterfactual: raw delta -> pillar recompute -> STGNN autoregressive path."""
+"""Phase A10 counterfactual: raw delta -> pillar recompute -> pillar-only STGNN autoregressive path."""
 
 from __future__ import annotations
 
@@ -14,24 +14,22 @@ from backend.pipeline import forecast as forecast_mod
 from backend.pipeline.forecast import (
     adaptive_blend_with_fallback,
     apply_fail_safe_policy,
-    apply_temporal_rate_limits,
-    bounded_score_predictions,
-    build_node_features,
+    build_pillar_node_features,
     clamp_pillars_to_support,
     clamp_pillar_deltas,
     compute_ood_score,
     extrapolate_pillar_slopes,
     extrapolated_pillars_at_year,
-    lag_support_bounds,
     load_edge_index_and_counties,
     load_forecast_model,
-    load_lag_norm,
+    load_pillar_target_scaler,
+    inverse_scale_pillar_matrix,
     pillar_delta_limits,
     pillar_support_bounds,
-    score_temporal_limits,
 )
 from backend.pipeline.pillar_transform import (
     load_frozen_transforms,
+    pillar_matrix_to_scores,
     raw_to_pillars,
 )
 from backend.pipeline.preprocessing import CONSTANTS as PRE_CONST
@@ -45,6 +43,7 @@ CONSTANTS: dict[str, Any] = {
     "SCENARIO_OUTPUT_FILENAME": "counterfactual_scenarios.csv",
     "REAL_VARIANT_ID": 0,
     "YEAR_2025": 2025,
+    "WINDOW_INPUT_YEARS": [2024, 2025],
     "CLIP_MIN": 0.0,
     "CLIP_MAX": 1.0,
     "DELTA_MIN": -1.0,
@@ -134,25 +133,20 @@ def _load_baseline_forecast_scores() -> dict[tuple[str, int], float]:
     return out
 
 
-def _score_trend_fallback(scores_real: pd.DataFrame, counties: list[str], year: int) -> np.ndarray:
-    """Compute bounded county score trend fallback for invalid scenario outputs."""
-    years = np.array(forecast_mod.CONSTANTS["HISTORICAL_YEARS_FOR_TREND"], dtype=np.float64)
-    fallback = np.zeros(forecast_mod.CONSTANTS["EXPECTED_NODES"], dtype=np.float64)
-    for idx, county in enumerate(counties):
-        series = np.array(
-            [
-                float(scores_real[(scores_real["county"] == county) & (scores_real["year"] == y)]["score"].iloc[0])
-                for y in forecast_mod.CONSTANTS["HISTORICAL_YEARS_FOR_TREND"]
-            ],
-            dtype=np.float64,
-        )
-        slope, intercept = np.polyfit(years, series, deg=1)
-        fallback[idx] = (slope * float(year)) + intercept
-    return np.clip(
-        fallback,
-        forecast_mod.CONSTANTS["SCORE_MIN"],
-        forecast_mod.CONSTANTS["SCORE_MAX"],
-    )
+def _pillar_matrix_for_year(
+    pillars_df: pd.DataFrame,
+    counties: list[str],
+    year: int,
+) -> np.ndarray:
+    """Return (N, 4) pillar matrix for one year and real variant."""
+    sub = pillars_df[
+        (pillars_df["variant_id"] == CONSTANTS["REAL_VARIANT_ID"]) & (pillars_df["year"] == year)
+    ].set_index("county")
+    matrix = np.zeros((forecast_mod.CONSTANTS["EXPECTED_NODES"], forecast_mod.CONSTANTS["N_PILLARS"]), dtype=np.float64)
+    for i, county in enumerate(counties):
+        row = sub.loc[county]
+        matrix[i, :] = [float(row["P1"]), float(row["P2"]), float(row["P3"]), float(row["P4"])]
+    return matrix
 
 
 def simulate_counterfactual_global(
@@ -165,8 +159,7 @@ def simulate_counterfactual_global(
         horizon = len(forecast_years)
     device = torch.device("cpu")
     frozen = load_frozen_transforms()
-    y_bar, sigma_y = load_lag_norm()
-    target_mean, target_std = forecast_mod.load_target_scaler()
+    target_mean, target_std = load_pillar_target_scaler()
     edge_index, counties = load_edge_index_and_counties()
     edge_index = edge_index.to(device)
     model = load_forecast_model(device)
@@ -185,50 +178,30 @@ def simulate_counterfactual_global(
         s_base = _baseline_pillars_2025(county, pillars_df)
         pillar_shift_by_county[county] = s_tilde - s_base
 
-    scores_real = pd.read_csv(CONSTANTS["DATA_DIR"] / "sustainability_scores.csv")
     exp_n = forecast_mod.CONSTANTS["EXPECTED_NODES"]
     n_pil = forecast_mod.CONSTANTS["N_PILLARS"]
-    slopes, intercepts = extrapolate_pillar_slopes(pillars_df, counties)
+    historical_years = CONSTANTS["WINDOW_INPUT_YEARS"]
+    slopes, intercepts = extrapolate_pillar_slopes(pillars_df, counties, historical_years)
     pillar_lower, pillar_upper = pillar_support_bounds(pillars_df)
     pillar_delta_limit = pillar_delta_limits(pillars_df, counties)
-    lag_bounds = lag_support_bounds(scores_real, counties, y_bar, sigma_y)
-    velocity_limit, accel_limit = score_temporal_limits(scores_real, counties)
-    pillar_prev = np.zeros((exp_n, n_pil), dtype=np.float64)
-    sub_2025 = pillars_df[
-        (pillars_df["variant_id"] == CONSTANTS["REAL_VARIANT_ID"])
-        & (pillars_df["year"] == CONSTANTS["YEAR_2025"])
-    ].set_index("county")
-    for i, cty in enumerate(counties):
-        r = sub_2025.loc[cty]
-        pillar_prev[i, :] = [float(r["P1"]), float(r["P2"]), float(r["P3"]), float(r["P4"])]
     baseline_scores = _load_baseline_forecast_scores()
 
-    prev_scores_by_year: dict[int, np.ndarray] = {}
-    for y in range(2021, 2026):
-        prev_scores_by_year[y] = np.array(
-            [
-                float(
-                    scores_real[(scores_real["county"] == c) & (scores_real["year"] == y)]["score"].iloc[0]
-                )
-                for c in counties
-            ],
-            dtype=np.float64,
-        )
-
     window_tensors: list[Tensor] = []
-    for wy in forecast_mod.CONSTANTS["WINDOW_INPUT_YEARS"]:
-        p_mat = np.zeros((exp_n, n_pil), dtype=np.float64)
-        sub = pillars_df[
-            (pillars_df["variant_id"] == CONSTANTS["REAL_VARIANT_ID"]) & (pillars_df["year"] == wy)
-        ].set_index("county")
-        for i, cty in enumerate(counties):
-            r = sub.loc[cty]
-            p_mat[i, :] = [float(r["P1"]), float(r["P2"]), float(r["P3"]), float(r["P4"])]
-        prev_vec = prev_scores_by_year[wy - 1]
-        window_tensors.append(build_node_features(p_mat, prev_vec, wy, y_bar, sigma_y, lag_bounds).to(device))
+    for wy in CONSTANTS["WINDOW_INPUT_YEARS"]:
+        p_mat = _pillar_matrix_for_year(pillars_df, counties, wy).copy()
+        for county, shift in pillar_shift_by_county.items():
+            county_idx = counties.index(county)
+            if wy == CONSTANTS["YEAR_2025"]:
+                p_mat[county_idx, :] = p_mat[county_idx, :] + shift
+        p_mat = clamp_pillars_to_support(p_mat, pillar_lower, pillar_upper)
+        window_tensors.append(build_pillar_node_features(p_mat).to(device))
 
-    scenario_last = prev_scores_by_year[2025].copy()
-    scenario_last_delta = np.zeros_like(scenario_last)
+    pillar_prev = _pillar_matrix_for_year(pillars_df, counties, CONSTANTS["YEAR_2025"]).copy()
+    for county, shift in pillar_shift_by_county.items():
+        county_idx = counties.index(county)
+        pillar_prev[county_idx, :] = pillar_prev[county_idx, :] + shift
+    pillar_prev = clamp_pillars_to_support(pillar_prev, pillar_lower, pillar_upper)
+
     by_county: dict[str, dict[str, Any]] = {
         county: {
             "baseline": [],
@@ -248,64 +221,41 @@ def simulate_counterfactual_global(
 
     forecast_years_slice = forecast_years[:horizon]
     for fy in forecast_years_slice:
-        p_baseline = clamp_pillars_to_support(
+        seq = torch.stack(window_tensors, dim=0)
+        with torch.no_grad():
+            pred_scaled = model(seq, edge_index).cpu().numpy()
+        raw_pillars = inverse_scale_pillar_matrix(pred_scaled, target_mean, target_std)
+        fallback_pillars = clamp_pillars_to_support(
             extrapolated_pillars_at_year(slopes, intercepts, fy),
             pillar_lower,
             pillar_upper,
         )
-        p_baseline = clamp_pillar_deltas(p_baseline, pillar_prev, pillar_delta_limit)
-        p_baseline = clamp_pillars_to_support(p_baseline, pillar_lower, pillar_upper)
-        p_use = p_baseline.copy()
         for county, shift in pillar_shift_by_county.items():
             county_idx = counties.index(county)
-            p_use[county_idx, :] = p_baseline[county_idx, :] + shift
-        p_use = clamp_pillars_to_support(p_use, pillar_lower, pillar_upper)
-        prev_vec = scenario_last.copy()
+            raw_pillars[county_idx, :] = raw_pillars[county_idx, :] + shift
+        ood_scores = compute_ood_score(raw_pillars, pillar_lower, pillar_upper)
+        blended, _ = adaptive_blend_with_fallback(raw_pillars, fallback_pillars, ood_scores)
+        blended = clamp_pillar_deltas(blended, pillar_prev, pillar_delta_limit)
+        blended = clamp_pillars_to_support(blended, pillar_lower, pillar_upper)
+        invalid_mask = ~np.isfinite(blended).all(axis=1)
+        p_hat, _, _ = apply_fail_safe_policy(blended, fallback_pillars, invalid_mask)
+        derived_scores = pillar_matrix_to_scores(p_hat, frozen)
+        derived_scores = np.clip(
+            derived_scores,
+            forecast_mod.CONSTANTS["SCORE_MIN"],
+            forecast_mod.CONSTANTS["SCORE_MAX"],
+        )
 
-        lag_z = (prev_vec - y_bar) / max(sigma_y, forecast_mod.CONSTANTS["EPSILON"])
-        lag_z = np.clip(lag_z, lag_bounds[0], lag_bounds[1])
-        x_fy = build_node_features(p_use, prev_vec, fy, y_bar, sigma_y, lag_bounds).to(device)
-        seq = torch.stack(window_tensors, dim=0)
-        with torch.no_grad():
-            y_hat_scaled = model(seq, edge_index).cpu().numpy()
-        y_hat_raw = (y_hat_scaled * max(target_std, forecast_mod.CONSTANTS["EPSILON"])) + target_mean
-        fallback_scores = _score_trend_fallback(scores_real, counties, fy)
-        ood_scores = compute_ood_score(
-            pillars=p_use,
-            lag_z=lag_z,
-            raw_scores=y_hat_raw,
-            pillar_lower=pillar_lower,
-            pillar_upper=pillar_upper,
-            target_mean=target_mean,
-            target_std=target_std,
-        )
-        y_blend, _ = adaptive_blend_with_fallback(y_hat_raw, fallback_scores, ood_scores)
-        y_limited = apply_temporal_rate_limits(
-            y_blend,
-            scenario_last,
-            scenario_last_delta,
-            velocity_limit,
-            accel_limit,
-        )
-        invalid_mask = (
-            ~np.isfinite(y_limited)
-            | (y_limited < forecast_mod.CONSTANTS["SCORE_MIN"])
-            | (y_limited > forecast_mod.CONSTANTS["SCORE_MAX"])
-        )
-        y_safe, _, _ = apply_fail_safe_policy(y_limited, fallback_scores, ood_scores, invalid_mask)
-        y_hat, _ = bounded_score_predictions(y_safe, fallback_scores)
-
-        prior = scenario_last.copy()
         for idx, county in enumerate(counties):
             base_y = baseline_scores[(county, fy)]
-            scen_y = float(y_hat[idx])
+            scen_y = float(derived_scores[idx])
             by_county[county]["baseline"].append({"year": fy, "score": base_y})
             by_county[county]["counterfactual"].append({"year": fy, "score": round(scen_y, 1)})
             by_county[county]["uplift"].append({"year": fy, "delta": round(scen_y - base_y, 1)})
-        scenario_last_delta = y_hat - prior
-        scenario_last = y_hat.copy()
-        pillar_prev = p_baseline.copy()
-        window_tensors = [window_tensors[1], window_tensors[2], window_tensors[3], x_fy]
+
+        pillar_prev = p_hat.copy()
+        x_fy = build_pillar_node_features(p_hat).to(device)
+        window_tensors = [window_tensors[1], x_fy]
 
     for county in counties:
         uplift = by_county[county]["uplift"]

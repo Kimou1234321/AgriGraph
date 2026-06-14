@@ -1,0 +1,50 @@
+\contentsline {section}{\numberline {1}Scope and data context}{3}{section.1}%
+\contentsline {section}{\numberline {2}End-to-end pipeline overview}{3}{section.2}%
+\contentsline {subsection}{\numberline {2.1}Phase sequence}{3}{subsection.2.1}%
+\contentsline {subsection}{\numberline {2.2}Conceptual flow diagram}{4}{subsection.2.2}%
+\contentsline {section}{\numberline {3}Spatial graph (Phase A6)}{4}{section.3}%
+\contentsline {subsection}{\numberline {3.1}Construction}{4}{subsection.3.1}%
+\contentsline {subsection}{\numberline {3.2}Artifacts}{4}{subsection.3.2}%
+\contentsline {section}{\numberline {4}STGNN pipeline (Phases A7 and A7b)}{4}{section.4}%
+\contentsline {subsection}{\numberline {4.1}Libraries}{4}{subsection.4.1}%
+\contentsline {subsection}{\numberline {4.2}Node features and temporal tensor}{4}{subsection.4.2}%
+\contentsline {subsection}{\numberline {4.3}Targets and scaling}{5}{subsection.4.3}%
+\contentsline {subsection}{\numberline {4.4}Architecture}{5}{subsection.4.4}%
+\contentsline {subsection}{\numberline {4.5}Training logs}{5}{subsection.4.5}%
+\contentsline {subsection}{\numberline {4.6}Hyperparameters and optimisation}{5}{subsection.4.6}%
+\contentsline {subsection}{\numberline {4.7}Phase A7 --- evaluation protocol}{6}{subsection.4.7}%
+\contentsline {subsection}{\numberline {4.8}Phase A7b --- forecast weights}{6}{subsection.4.8}%
+\contentsline {subsection}{\numberline {4.9}Key artifact filenames}{7}{subsection.4.9}%
+\contentsline {section}{\numberline {5}Upstream modelling (CVAE and PCA pillars)}{7}{section.5}%
+\contentsline {subsection}{\numberline {5.1}Conditional VAE augmentation (Phase A3)}{7}{subsection.5.1}%
+\contentsline {subsection}{\numberline {5.2}PCA pillars and scores (Phases A4--A5)}{7}{subsection.5.2}%
+\contentsline {section}{\numberline {6}Downstream of the STGNN: forecast, uncertainty, counterfactuals}{8}{section.6}%
+\contentsline {subsection}{\numberline {6.1}Autoregressive forecast (Phase A8)}{8}{subsection.6.1}%
+\contentsline {subsection}{\numberline {6.2}Monte Carlo uncertainty (Phase A9)}{8}{subsection.6.2}%
+\contentsline {subsection}{\numberline {6.3}Counterfactual simulation (Phase A10)}{8}{subsection.6.3}%
+\contentsline {section}{\numberline {7}Backend: technologies and behaviour}{8}{section.7}%
+\contentsline {subsection}{\numberline {7.1}Stack and dependencies}{8}{subsection.7.1}%
+\contentsline {subsection}{\numberline {7.2}Application entrypoint}{9}{subsection.7.2}%
+\contentsline {subsection}{\numberline {7.3}Loaded application state}{9}{subsection.7.3}%
+\contentsline {subsection}{\numberline {7.4}REST API summary}{9}{subsection.7.4}%
+\contentsline {subsection}{\numberline {7.5}Request bounds (illustrative)}{10}{subsection.7.5}%
+\contentsline {subsection}{\numberline {7.6}Forecast baselines (\texttt {/comparison})}{10}{subsection.7.6}%
+\contentsline {section}{\numberline {8}Frontend: technologies and usage}{10}{section.8}%
+\contentsline {subsection}{\numberline {8.1}Stack}{10}{subsection.8.1}%
+\contentsline {subsection}{\numberline {8.2}API configuration}{11}{subsection.8.2}%
+\contentsline {subsection}{\numberline {8.3}Main UI structure}{11}{subsection.8.3}%
+\contentsline {subsubsection}{\numberline {8.3.1}Atlas}{11}{subsubsection.8.3.1}%
+\contentsline {subsubsection}{\numberline {8.3.2}Benchmarks}{11}{subsubsection.8.3.2}%
+\contentsline {subsubsection}{\numberline {8.3.3}Methodology}{11}{subsubsection.8.3.3}%
+\contentsline {subsection}{\numberline {8.4}Typical local workflow}{11}{subsection.8.4}%
+\contentsline {subsection}{\numberline {8.5}Atlas tab (primary workflow)}{12}{subsection.8.5}%
+\contentsline {subsection}{\numberline {8.6}Benchmarks tab}{12}{subsection.8.6}%
+\contentsline {subsection}{\numberline {8.7}Methodology tab}{12}{subsection.8.7}%
+\contentsline {subsection}{\numberline {8.8}Frontend module map (concise)}{12}{subsection.8.8}%
+\contentsline {section}{\numberline {9}Operational notes}{12}{section.9}%
+\contentsline {subsection}{\numberline {9.1}Pillar display scaling (API)}{13}{subsection.9.1}%
+\contentsline {subsection}{\numberline {9.2}CORS and deployment}{13}{subsection.9.2}%
+\contentsline {subsection}{\numberline {9.3}Illustrative JSON payloads}{13}{subsection.9.3}%
+\contentsline {section}{\numberline {A}Tensor shapes and attention mask}{13}{appendix.A}%
+\contentsline {section}{\numberline {B}Repository locations (reference)}{14}{appendix.B}%
+\contentsline {section}{\numberline {C}ICBF feature columns used in PCA}{14}{appendix.C}%

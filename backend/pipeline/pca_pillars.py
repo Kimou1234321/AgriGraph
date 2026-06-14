@@ -30,6 +30,7 @@ CONSTANTS: dict[str, Any] = {
     "SCORE_MIN": 0.0,
     "SCORE_MAX": 100.0,
     "SCORE_ROUND_DECIMALS": 1,
+    "SCORE_FALLBACK": 50.0,
     "EPSILON": 1e-8,
     "NEGATIVE_POLARITY_FEATURES": {
         "calving_interval",
@@ -219,15 +220,19 @@ def _compute_alpha_weights(variance_ratios: np.ndarray) -> np.ndarray:
     return alpha
 
 
-def _compute_scaled_scores(standardized_pillars: np.ndarray, alpha: np.ndarray) -> tuple[np.ndarray, float, float]:
-    """Compute composite index and rescale to SCORE_MIN..SCORE_MAX."""
-    index_values = standardized_pillars @ alpha
+def _compute_scaled_scores(standardized_pillars: np.ndarray) -> tuple[np.ndarray, float, float]:
+    """Compute simple-average composite index and min-max rescale to SCORE_MIN..SCORE_MAX."""
+    index_values = standardized_pillars.mean(axis=1)
     index_min = float(np.min(index_values))
     index_max = float(np.max(index_values))
-    denom = max(index_max - index_min, CONSTANTS["EPSILON"])
-    score_values = CONSTANTS["SCORE_MIN"] + (
-        (CONSTANTS["SCORE_MAX"] - CONSTANTS["SCORE_MIN"]) * (index_values - index_min) / denom
-    )
+    if abs(index_max - index_min) <= CONSTANTS["EPSILON"]:
+        score_values = np.full(
+            standardized_pillars.shape[0],
+            CONSTANTS["SCORE_FALLBACK"],
+            dtype=np.float64,
+        )
+    else:
+        score_values = CONSTANTS["SCORE_MAX"] * (index_values - index_min) / (index_max - index_min)
     score_values = np.round(score_values, CONSTANTS["SCORE_ROUND_DECIMALS"])
     return score_values, index_min, index_max
 
@@ -275,6 +280,9 @@ def _save_artifacts(
         "I_max": index_max,
         "SCORE_MIN": CONSTANTS["SCORE_MIN"],
         "SCORE_MAX": CONSTANTS["SCORE_MAX"],
+        "SCORE_FALLBACK": CONSTANTS["SCORE_FALLBACK"],
+        "SCORE_ROUND_DECIMALS": CONSTANTS["SCORE_ROUND_DECIMALS"],
+        "score_formula": "simple_average_minmax",
     }
     with score_params_path.open("wb") as file:
         pickle.dump(score_params_payload, file)
@@ -344,7 +352,7 @@ def run_pca_and_scoring() -> None:
         dominant_indices_map=dominant_indices_map,
     )
     alpha = _compute_alpha_weights(variance_ratios)
-    score_values, index_min, index_max = _compute_scaled_scores(standardized_pillars, alpha)
+    score_values, index_min, index_max = _compute_scaled_scores(standardized_pillars)
 
     _save_artifacts(
         scaler=scaler,

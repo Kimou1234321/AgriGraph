@@ -1,4 +1,4 @@
-"""Phases A7-A7b STGNN eval training and full-data forecast retraining."""
+"""Phases A7-A7b STGNN eval training and full-data forecast retraining (pillar output)."""
 
 from __future__ import annotations
 
@@ -15,32 +15,34 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from torch import Tensor, nn
 from torch_geometric.nn import GCNConv
 
+from backend.pipeline.pillar_transform import load_frozen_transforms, pillar_matrix_to_scores
+
 CONSTANTS: dict[str, Any] = {
     "PHASE": "A7_A7B",
     "DATA_DIR": Path(__file__).resolve().parents[1] / "data",
     "ARTIFACTS_DIR": Path(__file__).resolve().parents[1] / "artifacts",
     "MODELS_DIR": Path(__file__).resolve().parents[1] / "models",
     "PILLAR_SCORES_FILENAME": "pillar_scores_augmented.csv",
-    "SCORES_AUGMENTED_FILENAME": "sustainability_scores_augmented.csv",
     "SCORES_REAL_FILENAME": "sustainability_scores.csv",
     "EDGE_INDEX_FILENAME": "edge_index.pt",
     "COUNTIES_FILENAME": "graph_counties.pkl",
-    "LAG_NORM_FILENAME": "lag_norm.pkl",
     "EVAL_WEIGHTS_FILENAME": "stgnn_eval_weights.pt",
     "FORECAST_WEIGHTS_FILENAME": "stgnn_forecast_weights.pt",
     "METRICS_FILENAME": "stgnn_metrics.json",
-    "TARGET_SCALER_FILENAME": "stgnn_target_scaler.pkl",
+    "PILLAR_TARGET_SCALER_FILENAME": "stgnn_pillar_target_scaler.pkl",
     "EVAL_PREDICTIONS_FILENAME": "stgnn_eval_predictions.csv",
     "F_PILLARS": 4,
-    "F_TOTAL": 5,
-    "GCN_HIDDEN": 64,
-    "ATTN_DIM": 32,
+    "F_TOTAL": 4,
+    "OUTPUT_DIM": 4,
+    "GCN_HIDDEN": 24,
     "HEAD_HIDDEN": 16,
-    "DROPOUT": 0.2,
+    "DROPOUT": 0.1,
     "EPOCHS": 500,
     "LEARNING_RATE": 1e-3,
     "WEIGHT_DECAY": 1e-4,
-    "INPUT_YEARS": [2021, 2022, 2023, 2024],
+    "WINDOW_LEN": 2,
+    "INPUT_YEAR_PAIRS": [(2021, 2022, 2023), (2022, 2023, 2024), (2023, 2024, 2025)],
+    "EVAL_INPUT_PAIR": (2023, 2024, 2025),
     "TARGET_YEAR": 2025,
     "REAL_VARIANT_ID": 0,
     "SYNTHETIC_VARIANTS": [1, 2, 3, 4],
@@ -49,58 +51,34 @@ CONSTANTS: dict[str, Any] = {
     "EPSILON": 1e-8,
     "LOG_EPOCHS": (1, 100, 250, 500),
     "EXPECTED_NODES": 26,
-    "EXPECTED_T": 4,
 }
 
 
 class STGNN(nn.Module):
-    """Spatio-temporal GNN: 2 GCN layers, causal temporal attention, regression head."""
+    """Lightweight spatio-temporal GNN: 1 GCN per timestep, concat temporal state, 4-pillar head."""
 
     def __init__(self) -> None:
-        """Initialize GCN, attention projections, and regression layers."""
+        """Initialize GCN layers and pillar regression head."""
         super().__init__()
-        self.conv1 = GCNConv(CONSTANTS["F_TOTAL"], CONSTANTS["GCN_HIDDEN"])
-        self.conv2 = GCNConv(CONSTANTS["GCN_HIDDEN"], CONSTANTS["GCN_HIDDEN"])
+        self.conv = GCNConv(CONSTANTS["F_TOTAL"], CONSTANTS["GCN_HIDDEN"])
         self.dropout = nn.Dropout(CONSTANTS["DROPOUT"])
-        self.w_q = nn.Linear(CONSTANTS["GCN_HIDDEN"], CONSTANTS["ATTN_DIM"])
-        self.w_k = nn.Linear(CONSTANTS["GCN_HIDDEN"], CONSTANTS["ATTN_DIM"])
-        self.w_v = nn.Linear(CONSTANTS["GCN_HIDDEN"], CONSTANTS["ATTN_DIM"])
-        self.w_out = nn.Linear(CONSTANTS["ATTN_DIM"], CONSTANTS["ATTN_DIM"])
-        self.head1 = nn.Linear(CONSTANTS["ATTN_DIM"], CONSTANTS["HEAD_HIDDEN"])
-        self.head2 = nn.Linear(CONSTANTS["HEAD_HIDDEN"], 1)
+        combined_dim = CONSTANTS["GCN_HIDDEN"] * CONSTANTS["WINDOW_LEN"]
+        self.head1 = nn.Linear(combined_dim, CONSTANTS["HEAD_HIDDEN"])
+        self.head2 = nn.Linear(CONSTANTS["HEAD_HIDDEN"], CONSTANTS["OUTPUT_DIM"])
 
     def forward(self, x_seq: Tensor, edge_index: Tensor) -> Tensor:
-        """Predict county scores for TARGET_YEAR from input years [2021..2024]."""
+        """Predict next-year pillar vector (N, 4) from a 2-step pillar window."""
         time_steps, _, _ = x_seq.shape
         spatial_embeddings: list[Tensor] = []
         for t in range(time_steps):
             node_features = x_seq[t]
-            hidden = self.conv1(node_features, edge_index)
-            hidden = F.relu(hidden)
-            hidden = self.dropout(hidden)
-            hidden = self.conv2(hidden, edge_index)
+            hidden = self.conv(node_features, edge_index)
             hidden = F.relu(hidden)
             hidden = self.dropout(hidden)
             spatial_embeddings.append(hidden)
-        h_stack = torch.stack(spatial_embeddings, dim=0)
-        queries = self.w_q(h_stack)
-        keys = self.w_k(h_stack)
-        values = self.w_v(h_stack)
-        last_idx = time_steps - 1
-        query_last = queries[last_idx]
-        scale = float(CONSTANTS["ATTN_DIM"]) ** 0.5
-        scores = torch.einsum("nd,tnd->nt", query_last, keys) / scale
-        future_mask = torch.triu(
-            torch.ones(time_steps, time_steps, device=x_seq.device, dtype=torch.bool),
-            diagonal=1,
-        )
-        mask_row = future_mask[last_idx].unsqueeze(0).expand_as(scores)
-        scores = scores.masked_fill(mask_row, float("-inf"))
-        attention_weights = F.softmax(scores, dim=1)
-        context = torch.einsum("nt,tnd->nd", attention_weights, values)
-        context = self.w_out(context)
-        head_hidden = F.relu(self.head1(context))
-        predictions = self.head2(head_hidden).squeeze(-1)
+        combined = torch.cat(spatial_embeddings, dim=1)
+        head_hidden = F.relu(self.head1(combined))
+        predictions = self.head2(head_hidden)
         return predictions
 
 
@@ -142,139 +120,113 @@ def _load_counties() -> list[str]:
     return list(counties)
 
 
-def _load_pillar_and_score_frames() -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Load pillar scores and augmented sustainability scores."""
+def _load_pillar_frame() -> pd.DataFrame:
+    """Load pillar scores augmented dataframe."""
     pillar_path = CONSTANTS["DATA_DIR"] / CONSTANTS["PILLAR_SCORES_FILENAME"]
-    score_path = CONSTANTS["DATA_DIR"] / CONSTANTS["SCORES_AUGMENTED_FILENAME"]
     if not pillar_path.exists():
         raise FileNotFoundError(f"[A7] Missing {pillar_path}")
-    if not score_path.exists():
-        raise FileNotFoundError(f"[A7] Missing {score_path}")
-    pillars_df = pd.read_csv(pillar_path)
-    scores_df = pd.read_csv(score_path)
-    return pillars_df, scores_df
+    return pd.read_csv(pillar_path)
 
 
-def _compute_lag_norm(scores_df: pd.DataFrame) -> tuple[float, float]:
-    """Compute global mean and std of scores over all augmented rows for lag scaling."""
-    y_bar = float(scores_df["score"].mean())
-    sigma_y = float(scores_df["score"].std())
-    if sigma_y <= CONSTANTS["EPSILON"]:
-        sigma_y = 1.0
-    return y_bar, sigma_y
-
-
-def _compute_target_scaler(scores_df: pd.DataFrame) -> tuple[float, float]:
-    """Compute score target scaling parameters from augmented training rows."""
-    target_mean = float(scores_df["score"].mean())
-    target_std = float(scores_df["score"].std())
-    if target_std <= CONSTANTS["EPSILON"]:
-        target_std = 1.0
+def _compute_pillar_target_scaler(pillars_df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+    """Compute per-pillar target mean and std from augmented training rows."""
+    cols = [f"P{i + 1}" for i in range(CONSTANTS["F_PILLARS"])]
+    target_mean = pillars_df[cols].mean(axis=0).to_numpy(dtype=np.float64)
+    target_std = pillars_df[cols].std(axis=0).to_numpy(dtype=np.float64)
+    target_std = np.where(target_std <= CONSTANTS["EPSILON"], 1.0, target_std)
     return target_mean, target_std
 
 
-def _save_lag_norm(y_bar: float, sigma_y: float) -> None:
-    """Persist lag normalization constants for A8+."""
+def _save_pillar_target_scaler(target_mean: np.ndarray, target_std: np.ndarray) -> None:
+    """Persist pillar target scaling constants for A7/A7b/A8/A10 consistency."""
     CONSTANTS["ARTIFACTS_DIR"].mkdir(parents=True, exist_ok=True)
-    path = CONSTANTS["ARTIFACTS_DIR"] / CONSTANTS["LAG_NORM_FILENAME"]
-    payload = {"y_bar": y_bar, "sigma_y": sigma_y}
+    path = CONSTANTS["ARTIFACTS_DIR"] / CONSTANTS["PILLAR_TARGET_SCALER_FILENAME"]
+    payload = {"target_mean": target_mean.tolist(), "target_std": target_std.tolist()}
     with path.open("wb") as file:
         pickle.dump(payload, file)
-    print(f"[A7] Saved lag norm: {path} y_bar={y_bar:.6f}, sigma_y={sigma_y:.6f}")
+    print(f"[A7] Saved pillar target scaler: {path}")
 
 
-def _save_target_scaler(target_mean: float, target_std: float) -> None:
-    """Persist target scaling constants for A7/A7b/A8/A10 consistency."""
-    CONSTANTS["ARTIFACTS_DIR"].mkdir(parents=True, exist_ok=True)
-    path = CONSTANTS["ARTIFACTS_DIR"] / CONSTANTS["TARGET_SCALER_FILENAME"]
-    payload = {"target_mean": target_mean, "target_std": target_std}
-    with path.open("wb") as file:
-        pickle.dump(payload, file)
-    print(f"[A7] Saved target scaler: {path} mean={target_mean:.6f}, std={target_std:.6f}")
+def _scale_pillar_matrix(values: np.ndarray, target_mean: np.ndarray, target_std: np.ndarray) -> Tensor:
+    """Standardize pillar matrix (N, 4) for stable optimization."""
+    scaled = (values - target_mean.reshape(1, -1)) / np.maximum(target_std.reshape(1, -1), CONSTANTS["EPSILON"])
+    return torch.tensor(scaled, dtype=torch.float32)
 
 
-def _scale_values(values: Tensor, target_mean: float, target_std: float) -> Tensor:
-    """Standardize score values for stable optimization."""
-    return (values - target_mean) / max(target_std, CONSTANTS["EPSILON"])
+def _inverse_scale_pillar_matrix(values: np.ndarray, target_mean: np.ndarray, target_std: np.ndarray) -> np.ndarray:
+    """Map standardized pillar predictions back to pillar units."""
+    return (values * np.maximum(target_std.reshape(1, -1), CONSTANTS["EPSILON"])) + target_mean.reshape(1, -1)
 
 
-def _inverse_scale_numpy(values: np.ndarray, target_mean: float, target_std: float) -> np.ndarray:
-    """Map standardized predictions back to score units."""
-    return (values * max(target_std, CONSTANTS["EPSILON"])) + target_mean
-
-
-def _build_snapshot_tensor(
+def _pillar_matrix_for_year(
     pillars_df: pd.DataFrame,
-    scores_df: pd.DataFrame,
     counties: list[str],
     variant_id: int,
     year: int,
-    y_bar: float,
-    sigma_y: float,
-) -> Tensor:
-    """Build node feature matrix (N, 5) for one graph snapshot."""
+) -> np.ndarray:
+    """Build node feature matrix (N, 4) for one graph snapshot."""
     county_to_idx = {c: i for i, c in enumerate(counties)}
     p_sub = pillars_df[
         (pillars_df["variant_id"] == variant_id) & (pillars_df["year"] == year)
     ].set_index("county")
-    s_sub = scores_df.set_index(["county", "year", "variant_id"])
     features = np.zeros((CONSTANTS["EXPECTED_NODES"], CONSTANTS["F_TOTAL"]), dtype=np.float64)
     for county in counties:
         idx = county_to_idx[county]
         row_p = p_sub.loc[county]
-        p1, p2, p3, p4 = float(row_p["P1"]), float(row_p["P2"]), float(row_p["P3"]), float(row_p["P4"])
-        if year == CONSTANTS["INPUT_YEARS"][0]:
-            lag_val = 0.0
-        else:
-            prev_year = year - 1
-            y_prev = float(s_sub.loc[(county, prev_year, variant_id), "score"])
-            lag_val = (y_prev - y_bar) / sigma_y
-        features[idx, 0] = p1
-        features[idx, 1] = p2
-        features[idx, 2] = p3
-        features[idx, 3] = p4
-        features[idx, 4] = lag_val
-    return torch.tensor(features, dtype=torch.float32)
+        features[idx, 0] = float(row_p["P1"])
+        features[idx, 1] = float(row_p["P2"])
+        features[idx, 2] = float(row_p["P3"])
+        features[idx, 3] = float(row_p["P4"])
+    return features
 
 
 def _build_sequence_tensor(
     pillars_df: pd.DataFrame,
-    scores_df: pd.DataFrame,
     counties: list[str],
     variant_id: int,
-    y_bar: float,
-    sigma_y: float,
+    year_pair: tuple[int, int, int],
 ) -> Tensor:
-    """Stack T=4 snapshots into (T, N, F)."""
+    """Stack T=2 pillar snapshots into (T, N, F)."""
+    y1, y2, _ = year_pair
     snapshots = [
-        _build_snapshot_tensor(pillars_df, scores_df, counties, variant_id, y, y_bar, sigma_y)
-        for y in CONSTANTS["INPUT_YEARS"]
+        _pillar_matrix_for_year(pillars_df, counties, variant_id, y1),
+        _pillar_matrix_for_year(pillars_df, counties, variant_id, y2),
     ]
-    return torch.stack(snapshots, dim=0)
+    return torch.tensor(np.stack(snapshots, axis=0), dtype=torch.float32)
 
 
-def _target_vector(
-    scores_df: pd.DataFrame,
+def _target_pillar_matrix(
+    pillars_df: pd.DataFrame,
     counties: list[str],
     variant_id: int,
-) -> Tensor:
-    """Return 2025 target scores (N,) for one variant."""
-    county_to_idx = {c: i for i, c in enumerate(counties)}
-    sub = scores_df[
-        (scores_df["variant_id"] == variant_id) & (scores_df["year"] == CONSTANTS["TARGET_YEAR"])
-    ].set_index("county")
-    target = np.zeros(CONSTANTS["EXPECTED_NODES"], dtype=np.float64)
-    for county in counties:
-        target[county_to_idx[county]] = float(sub.loc[county, "score"])
-    return torch.tensor(target, dtype=torch.float32)
+    target_year: int,
+) -> np.ndarray:
+    """Return target pillar matrix (N, 4) for one variant and year."""
+    return _pillar_matrix_for_year(pillars_df, counties, variant_id, target_year)
+
+
+def _build_training_samples(
+    pillars_df: pd.DataFrame,
+    counties: list[str],
+    variant_id: int,
+    target_mean: np.ndarray,
+    target_std: np.ndarray,
+) -> list[tuple[Tensor, Tensor]]:
+    """Build sliding 2-step training samples for one variant."""
+    samples: list[tuple[Tensor, Tensor]] = []
+    for y1, y2, target_year in CONSTANTS["INPUT_YEAR_PAIRS"]:
+        seq = _build_sequence_tensor(pillars_df, counties, variant_id, (y1, y2, target_year))
+        target_raw = _target_pillar_matrix(pillars_df, counties, variant_id, target_year)
+        target_scaled = _scale_pillar_matrix(target_raw, target_mean, target_std)
+        samples.append((seq, target_scaled))
+    return samples
 
 
 def _train_one_run(
     model: STGNN,
     edge_index: Tensor,
     train_variants: list[int],
-    seq_by_variant: dict[int, Tensor],
-    target_by_variant: dict[int, Tensor],
+    samples_by_variant: dict[int, list[tuple[Tensor, Tensor]]],
     epochs: int,
     phase_tag: str,
 ) -> None:
@@ -288,11 +240,14 @@ def _train_one_run(
         model.train()
         optimizer.zero_grad()
         loss = torch.tensor(0.0, dtype=torch.float32, device=edge_index.device)
+        sample_count = 0
         for vid in train_variants:
-            pred = model(seq_by_variant[vid], edge_index)
-            diff = pred - target_by_variant[vid]
-            loss = loss + (diff * diff).sum()
-        denom = len(train_variants) * CONSTANTS["EXPECTED_NODES"]
+            for seq, target in samples_by_variant[vid]:
+                pred = model(seq, edge_index)
+                diff = pred - target
+                loss = loss + (diff * diff).sum()
+                sample_count += 1
+        denom = sample_count * CONSTANTS["EXPECTED_NODES"] * CONSTANTS["OUTPUT_DIM"]
         loss = loss / denom
         loss.backward()
         optimizer.step()
@@ -300,32 +255,31 @@ def _train_one_run(
             print(f"[{phase_tag}] Epoch {epoch:03d}/{epochs} train_mse={float(loss.detach()):.6f}")
 
 
-def _predict_variant(
+def _predict_sample(
     model: STGNN,
     edge_index: Tensor,
-    seq_by_variant: dict[int, Tensor],
-    variant_id: int,
+    seq: Tensor,
 ) -> np.ndarray:
-    """Run forward pass for one variant and return numpy predictions."""
+    """Run forward pass for one sequence and return numpy pillar predictions (N, 4)."""
     model.eval()
     with torch.no_grad():
-        pred = model(seq_by_variant[variant_id], edge_index)
+        pred = model(seq, edge_index)
     return pred.cpu().numpy()
 
 
-def _r2_over_variants(
+def _r2_over_variants_pillars(
     model: STGNN,
     edge_index: Tensor,
     variants: list[int],
-    seq_by_variant: dict[int, Tensor],
-    target_by_variant_scaled: dict[int, Tensor],
+    samples_by_variant: dict[int, list[tuple[Tensor, Tensor]]],
 ) -> float:
-    """Compute R² pooled over listed variants (each N nodes)."""
+    """Compute R² pooled over listed variants on standardized pillar targets."""
     y_true_list: list[np.ndarray] = []
     y_pred_list: list[np.ndarray] = []
     for vid in variants:
-        y_true_list.append(target_by_variant_scaled[vid].cpu().numpy())
-        y_pred_list.append(_predict_variant(model, edge_index, seq_by_variant, vid))
+        for seq, target in samples_by_variant[vid]:
+            y_true_list.append(target.cpu().numpy().reshape(-1))
+            y_pred_list.append(_predict_sample(model, edge_index, seq).reshape(-1))
     y_true = np.concatenate(y_true_list)
     y_pred = np.concatenate(y_pred_list)
     return float(r2_score(y_true, y_pred))
@@ -341,31 +295,27 @@ def _save_weights(path: Path, model: STGNN, extra: dict[str, Any]) -> None:
 
 def run_stgnn_training() -> None:
     """Run A7 K-fold + eval model + metrics, then A7b forecast model (no metrics)."""
-    _print_header("[A7] STGNN EVAL TRAINING + METRICS")
+    _print_header("[A7] STGNN PILLAR EVAL TRAINING + METRICS")
     _set_seed(CONSTANTS["SEED"])
     device = torch.device("cpu")
     edge_index = _load_edge_index().to(device)
     counties = _load_counties()
-    pillars_df, scores_df = _load_pillar_and_score_frames()
-    y_bar, sigma_y = _compute_lag_norm(scores_df)
-    _save_lag_norm(y_bar, sigma_y)
-    target_mean, target_std = _compute_target_scaler(scores_df)
-    _save_target_scaler(target_mean, target_std)
+    pillars_df = _load_pillar_frame()
+    target_mean, target_std = _compute_pillar_target_scaler(pillars_df)
+    _save_pillar_target_scaler(target_mean, target_std)
+    frozen = load_frozen_transforms()
 
-    seq_by_variant: dict[int, Tensor] = {}
-    target_by_variant_raw: dict[int, Tensor] = {}
-    target_by_variant_scaled: dict[int, Tensor] = {}
+    samples_by_variant: dict[int, list[tuple[Tensor, Tensor]]] = {}
     for vid in CONSTANTS["ALL_VARIANTS"]:
-        seq_by_variant[vid] = _build_sequence_tensor(
-            pillars_df, scores_df, counties, vid, y_bar, sigma_y
-        ).to(device)
-        target_raw = _target_vector(scores_df, counties, vid).to(device)
-        target_by_variant_raw[vid] = target_raw
-        target_by_variant_scaled[vid] = _scale_values(target_raw, target_mean, target_std)
+        samples_by_variant[vid] = _build_training_samples(
+            pillars_df, counties, vid, target_mean, target_std
+        )
+        for seq, _ in samples_by_variant[vid]:
+            seq.to(device)
 
     print(
-        f"[A7] Built sequences: T={CONSTANTS['EXPECTED_T']}, N={CONSTANTS['EXPECTED_NODES']}, "
-        f"F={CONSTANTS['F_TOTAL']}, variants={CONSTANTS['ALL_VARIANTS']}"
+        f"[A7] Built pillar sequences: T={CONSTANTS['WINDOW_LEN']}, N={CONSTANTS['EXPECTED_NODES']}, "
+        f"F={CONSTANTS['F_TOTAL']}, output={CONSTANTS['OUTPUT_DIM']}, variants={CONSTANTS['ALL_VARIANTS']}"
     )
 
     synth = CONSTANTS["SYNTHETIC_VARIANTS"]
@@ -381,25 +331,12 @@ def run_stgnn_training() -> None:
             model,
             edge_index,
             train_variants,
-            seq_by_variant,
-            target_by_variant_scaled,
+            samples_by_variant,
             CONSTANTS["EPOCHS"],
             f"A7-fold{fold_idx + 1}",
         )
-        train_r2 = _r2_over_variants(
-            model,
-            edge_index,
-            train_variants,
-            seq_by_variant,
-            target_by_variant_scaled,
-        )
-        val_r2 = _r2_over_variants(
-            model,
-            edge_index,
-            [val_variant],
-            seq_by_variant,
-            target_by_variant_scaled,
-        )
+        train_r2 = _r2_over_variants_pillars(model, edge_index, train_variants, samples_by_variant)
+        val_r2 = _r2_over_variants_pillars(model, edge_index, [val_variant], samples_by_variant)
         training_r2_per_fold.append(train_r2)
         validation_r2_per_fold.append(val_r2)
         print(f"[A7] Fold {fold_idx + 1} train_R2={train_r2:.6f} val_R2={val_r2:.6f}")
@@ -414,8 +351,7 @@ def run_stgnn_training() -> None:
         eval_model,
         edge_index,
         eval_train_variants,
-        seq_by_variant,
-        target_by_variant_scaled,
+        samples_by_variant,
         CONSTANTS["EPOCHS"],
         "A7-final",
     )
@@ -425,9 +361,10 @@ def run_stgnn_training() -> None:
         eval_model,
         {
             "phase": "A7",
-            "lag_norm": {"y_bar": y_bar, "sigma_y": sigma_y},
-            "target_scaler": {"target_mean": target_mean, "target_std": target_std},
+            "pillar_target_scaler": {"target_mean": target_mean.tolist(), "target_std": target_std.tolist()},
             "counties": counties,
+            "window_len": CONSTANTS["WINDOW_LEN"],
+            "output_dim": CONSTANTS["OUTPUT_DIM"],
         },
     )
 
@@ -436,7 +373,7 @@ def run_stgnn_training() -> None:
         raise FileNotFoundError(f"[A7] Missing real scores for test: {real_target_path}")
     real_scores = pd.read_csv(real_target_path)
     county_to_idx = {c: i for i, c in enumerate(counties)}
-    y_test = np.zeros(CONSTANTS["EXPECTED_NODES"], dtype=np.float64)
+    y_test_score = np.zeros(CONSTANTS["EXPECTED_NODES"], dtype=np.float64)
     real_scores_target_year = real_scores[real_scores["year"] == CONSTANTS["TARGET_YEAR"]]
     if len(real_scores_target_year) != CONSTANTS["EXPECTED_NODES"]:
         raise ValueError(
@@ -444,29 +381,44 @@ def run_stgnn_training() -> None:
             f"{CONSTANTS['TARGET_YEAR']}, found {len(real_scores_target_year)}"
         )
     for _, row in real_scores_target_year.iterrows():
-        y_test[county_to_idx[str(row["county"])]] = float(row["score"])
+        y_test_score[county_to_idx[str(row["county"])]] = float(row["score"])
 
-    y_pred_scaled = _predict_variant(eval_model, edge_index, seq_by_variant, CONSTANTS["REAL_VARIANT_ID"])
-    y_pred_score = _inverse_scale_numpy(y_pred_scaled, target_mean, target_std)
-    test_r2 = float(r2_score(y_test, y_pred_score))
-    test_mae = float(mean_absolute_error(y_test, y_pred_score))
-    test_mse = float(mean_squared_error(y_test, y_pred_score))
-    y_test_norm = (y_test - target_mean) / max(target_std, CONSTANTS["EPSILON"])
-    y_pred_norm = (y_pred_score - target_mean) / max(target_std, CONSTANTS["EPSILON"])
+    eval_seq = _build_sequence_tensor(
+        pillars_df,
+        counties,
+        CONSTANTS["REAL_VARIANT_ID"],
+        CONSTANTS["EVAL_INPUT_PAIR"],
+    ).to(device)
+    y_pred_scaled = _predict_sample(eval_model, edge_index, eval_seq)
+    y_pred_pillars = _inverse_scale_pillar_matrix(y_pred_scaled, target_mean, target_std)
+    y_true_pillars = _target_pillar_matrix(
+        pillars_df, counties, CONSTANTS["REAL_VARIANT_ID"], CONSTANTS["TARGET_YEAR"]
+    )
+    y_pred_score = pillar_matrix_to_scores(y_pred_pillars, frozen)
+    test_r2 = float(r2_score(y_test_score, y_pred_score))
+    test_mae = float(mean_absolute_error(y_test_score, y_pred_score))
+    test_mse = float(mean_squared_error(y_test_score, y_pred_score))
+    y_test_norm = (y_test_score - float(np.mean(y_test_score))) / max(float(np.std(y_test_score)), CONSTANTS["EPSILON"])
+    y_pred_norm = (y_pred_score - float(np.mean(y_test_score))) / max(float(np.std(y_test_score)), CONSTANTS["EPSILON"])
     test_mae_norm = float(mean_absolute_error(y_test_norm, y_pred_norm))
     test_mse_norm = float(mean_squared_error(y_test_norm, y_pred_norm))
-    print(f"[A7] Test (variant_id=0, 2025) R2={test_r2:.6f} MAE={test_mae:.6f} MSE={test_mse:.6f}")
+    print(f"[A7] Test (variant_id=0, 2025) score R2={test_r2:.6f} MAE={test_mae:.6f} MSE={test_mse:.6f}")
 
     eval_predictions_df = pd.DataFrame(
         {
             "county": counties,
             "year": [CONSTANTS["TARGET_YEAR"]] * len(counties),
-            "y_true_score": y_test,
+            "y_true_score": y_test_score,
             "y_pred_score": y_pred_score,
-            "y_true_norm": y_test_norm,
-            "y_pred_norm": y_pred_norm,
-            "residual_score": y_pred_score - y_test,
-            "residual_norm": y_pred_norm - y_test_norm,
+            "y_true_P1": y_true_pillars[:, 0],
+            "y_true_P2": y_true_pillars[:, 1],
+            "y_true_P3": y_true_pillars[:, 2],
+            "y_true_P4": y_true_pillars[:, 3],
+            "y_pred_P1": y_pred_pillars[:, 0],
+            "y_pred_P2": y_pred_pillars[:, 1],
+            "y_pred_P3": y_pred_pillars[:, 2],
+            "y_pred_P4": y_pred_pillars[:, 3],
+            "residual_score": y_pred_score - y_test_score,
         }
     )
     eval_predictions_path = CONSTANTS["ARTIFACTS_DIR"] / CONSTANTS["EVAL_PREDICTIONS_FILENAME"]
@@ -486,11 +438,11 @@ def run_stgnn_training() -> None:
         "test_mse": test_mse,
         "test_mae_norm": test_mae_norm,
         "test_mse_norm": test_mse_norm,
-        "target_scale": "standardized",
-        "target_scaler": {"target_mean": target_mean, "target_std": target_std},
+        "target_scale": "pillar_standardized",
+        "pillar_target_scaler": {"target_mean": target_mean.tolist(), "target_std": target_std.tolist()},
         "eval_train_variants": eval_train_variants,
         "eval_test_variant": CONSTANTS["REAL_VARIANT_ID"],
-        "test_set": "variant_id=0, year=2025",
+        "test_set": "variant_id=0, year=2025, derived_score_from_pillars",
         "epochs": CONSTANTS["EPOCHS"],
     }
     metrics_path.write_text(json.dumps(metrics_payload, indent=2), encoding="utf-8")
@@ -502,8 +454,7 @@ def run_stgnn_training() -> None:
         forecast_model,
         edge_index,
         CONSTANTS["ALL_VARIANTS"],
-        seq_by_variant,
-        target_by_variant_scaled,
+        samples_by_variant,
         CONSTANTS["EPOCHS"],
         "A7b",
     )
@@ -513,9 +464,10 @@ def run_stgnn_training() -> None:
         forecast_model,
         {
             "phase": "A7b",
-            "lag_norm": {"y_bar": y_bar, "sigma_y": sigma_y},
-            "target_scaler": {"target_mean": target_mean, "target_std": target_std},
+            "pillar_target_scaler": {"target_mean": target_mean.tolist(), "target_std": target_std.tolist()},
             "counties": counties,
+            "window_len": CONSTANTS["WINDOW_LEN"],
+            "output_dim": CONSTANTS["OUTPUT_DIM"],
         },
     )
     print("[A7b] Completed; metrics unchanged (A7 only).")

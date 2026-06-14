@@ -32,8 +32,9 @@ export default function AtlasView({
   simulationError,
   atlasCountyConfirmed,
   setAtlasCountyConfirmed,
+  viewMode,
+  setViewMode,
 }) {
-  const [viewMode, setViewMode] = useState("initial");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [draft, setDraft] = useState(emptyInterventions());
   const [preview, setPreview] = useState(null);
@@ -47,7 +48,7 @@ export default function AtlasView({
 
   useEffect(() => {
     if (!simulationResults) setViewMode("initial");
-  }, [simulationResults]);
+  }, [simulationResults, setViewMode]);
 
   useEffect(() => {
     return () => {
