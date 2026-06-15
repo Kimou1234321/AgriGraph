@@ -29,6 +29,7 @@ build/
 venv/
 ENV/
 env/
+docs/
 
 # --- Backend runtime / artifacts ---
 backend/artifacts/
