@@ -42,7 +42,7 @@ function lineEndpointsOnRadii(node, width, height) {
   };
 }
 const CIRCLE_BOUNCE_MS = 580;
-const CIRCLE_START_WINDOW_MS = 500;
+const CIRCLE_START_WINDOW_MS = 200;
 const LINE_DURATION_MS = 260;
 const CARD_REVEAL_BUFFER_MS = 50;
 const CARD_REVEAL_DURATION_MS = 450;
